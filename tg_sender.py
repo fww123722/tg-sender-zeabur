@@ -951,7 +951,11 @@ async def _reply(event, *args, **kwargs):
 async def _login_accounts(bot, accounts, targets, owner_entity):
     """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
     登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
-    from telethon.errors import SessionPasswordNeededError
+    from telethon.errors import (
+        PhoneCodeExpiredError,
+        PhoneCodeInvalidError,
+        SessionPasswordNeededError,
+    )
 
     for acc_no, client, phone in accounts:
         if acc_no not in targets:
@@ -963,28 +967,40 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 await bot.send_message(owner_entity, f"⏭️ [账号{acc_no}] 已登录: {me.first_name} (@{me.username})，无需重复登录")
                 continue
 
-            # 1) 发送验证码
-            await bot.send_message(owner_entity, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…")
-            await client.send_code_request(phone)
+            # 验证码环节：过期/错误时自动重发，最多 3 次
+            signed_in = False
+            for attempt in (1, 2, 3):
+                await bot.send_message(owner_entity, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
+                await client.send_code_request(phone)
 
-            # 2) 等 owner 回复验证码
-            code = await ask_owner(bot, f"🔐 [账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字）：", acc_no, "code")
-            if not code:
-                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 验证码输入超时，登录中止。可重新发 /login {acc_no}")
-                await client.disconnect()
-                continue
-
-            # 3) 登录（处理 2FA）
-            try:
-                await client.sign_in(phone, code.strip())
-            except SessionPasswordNeededError:
-                pwd = await ask_owner(bot, f"🔑 [账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
-                if not pwd:
-                    await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 密码输入超时，登录中止。可重新发 /login {acc_no}")
+                code = await ask_owner(bot, f"🔐 [账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字，5 分钟内有效）：", acc_no, "code")
+                if not code:
+                    await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 验证码输入超时，登录中止。可重新发 /login {acc_no}")
                     await client.disconnect()
-                    continue
-                await client.sign_in(password=pwd.strip())
+                    break
 
+                try:
+                    await client.sign_in(phone, code.strip())
+                    signed_in = True
+                    break
+                except PhoneCodeExpiredError:
+                    await bot.send_message(owner_entity, "⌛ 验证码已过期，正在重新发送…请回复最新收到的数字")
+                    continue
+                except PhoneCodeInvalidError:
+                    await bot.send_message(owner_entity, "❌ 验证码错误，正在重新发送…请确认回复最新一条验证码的数字")
+                    continue
+                except SessionPasswordNeededError:
+                    pwd = await ask_owner(bot, f"🔑 [账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
+                    if not pwd:
+                        await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 密码输入超时，登录中止。可重新发 /login {acc_no}")
+                        await client.disconnect()
+                        break
+                    await client.sign_in(password=pwd.strip())
+                    signed_in = True
+                    break
+
+            if not signed_in:
+                continue
             if not await client.is_user_authorized():
                 await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录失败（验证码/密码错误）。可重新发 /login {acc_no}")
                 await client.disconnect()
@@ -1011,7 +1027,12 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
 async def _add_account_interactive(bot, phone, owner_entity):
     """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
     不依赖环境变量，成功后自动分配下一个可用序号。"""
-    from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+    from telethon.errors import (
+        PhoneCodeExpiredError,
+        PhoneCodeInvalidError,
+        PhoneNumberInvalidError,
+        SessionPasswordNeededError,
+    )
 
     phone = (phone or "").strip()
     if not re.match(r"^\+?\d{6,15}$", phone):
@@ -1030,27 +1051,40 @@ async def _add_account_interactive(bot, phone, owner_entity):
             await bot.send_message(owner_entity, f"⏭️ 该手机号已有有效 session: {me.first_name} (@{me.username})")
             return
 
-        await bot.send_message(owner_entity, f"📱 [新账号{acc_no}] 正在向 {phone} 发送验证码…")
-        await client.send_code_request(phone)
+        # 验证码环节：过期/错误时自动重发，最多 3 次
+        signed_in = False
+        for attempt in (1, 2, 3):
+            await bot.send_message(owner_entity, f"📱 [新账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
+            await client.send_code_request(phone)
 
-        code = await ask_owner(bot, f"🔐 [新账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字）：", acc_no, "code")
-        if not code:
-            await bot.send_message(owner_entity, f"❌ 验证码输入超时，添加中止。可重新点「添加账号」")
-            await client.disconnect()
-            return
-
-        try:
-            await client.sign_in(phone, code.strip())
-        except SessionPasswordNeededError:
-            pwd = await ask_owner(bot, f"🔑 [新账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
-            if not pwd:
-                await bot.send_message(owner_entity, "❌ 密码输入超时，添加中止")
+            code = await ask_owner(bot, f"🔐 [新账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字，5 分钟内有效）：", acc_no, "code")
+            if not code:
+                await bot.send_message(owner_entity, "❌ 验证码输入超时，添加中止。可重新点「添加账号」")
                 await client.disconnect()
                 return
-            await client.sign_in(password=pwd.strip())
 
-        if not await client.is_user_authorized():
-            await bot.send_message(owner_entity, "❌ 登录失败（验证码/密码错误），可重新点「添加账号」")
+            try:
+                await client.sign_in(phone, code.strip())
+                signed_in = True
+                break
+            except PhoneCodeExpiredError:
+                await bot.send_message(owner_entity, "⌛ 验证码已过期，正在重新发送新验证码…请回复最新收到的数字")
+                continue
+            except PhoneCodeInvalidError:
+                await bot.send_message(owner_entity, "❌ 验证码错误，正在重新发送…请确认回复最新一条验证码的数字")
+                continue
+            except SessionPasswordNeededError:
+                pwd = await ask_owner(bot, f"🔑 [新账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
+                if not pwd:
+                    await bot.send_message(owner_entity, "❌ 密码输入超时，添加中止")
+                    await client.disconnect()
+                    return
+                await client.sign_in(password=pwd.strip())
+                signed_in = True
+                break
+
+        if not signed_in or not await client.is_user_authorized():
+            await bot.send_message(owner_entity, "❌ 验证码连续失败，添加中止。请稍后重新点「添加账号」")
             await client.disconnect()
             return
 
