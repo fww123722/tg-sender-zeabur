@@ -1004,6 +1004,78 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 pass
 
 
+async def _add_account_interactive(bot, phone, owner_entity):
+    """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
+    不依赖环境变量，成功后自动分配下一个可用序号。"""
+    from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+
+    phone = (phone or "").strip()
+    if not re.match(r"^\+?\d{6,15}$", phone):
+        await bot.send_message(owner_entity, "❌ 手机号格式无效（应含国家码，如 +8613800138000）")
+        return
+
+    # 分配序号：现有最大序号 +1
+    acc_no = max(list(ACCS.keys()) + [a[0] for a in ACTIVE_ACCOUNTS] + [0]) + 1
+    sess = os.path.join(DATA_DIR, f"tg_session_{acc_no}.session")
+
+    client = TelegramClient(sess, API_ID, API_HASH)
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            await bot.send_message(owner_entity, f"⏭️ 该手机号已有有效 session: {me.first_name} (@{me.username})")
+            return
+
+        await bot.send_message(owner_entity, f"📱 [新账号{acc_no}] 正在向 {phone} 发送验证码…")
+        await client.send_code_request(phone)
+
+        code = await ask_owner(bot, f"🔐 [新账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字）：", acc_no, "code")
+        if not code:
+            await bot.send_message(owner_entity, f"❌ 验证码输入超时，添加中止。可重新点「添加账号」")
+            await client.disconnect()
+            return
+
+        try:
+            await client.sign_in(phone, code.strip())
+        except SessionPasswordNeededError:
+            pwd = await ask_owner(bot, f"🔑 [新账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
+            if not pwd:
+                await bot.send_message(owner_entity, "❌ 密码输入超时，添加中止")
+                await client.disconnect()
+                return
+            await client.sign_in(password=pwd.strip())
+
+        if not await client.is_user_authorized():
+            await bot.send_message(owner_entity, "❌ 登录失败（验证码/密码错误），可重新点「添加账号」")
+            await client.disconnect()
+            return
+
+        me = await client.get_me()
+        # 登记到 ACCS，让 /login、热替换等流程也能感知
+        ACCS[acc_no] = phone
+        ACTIVE_ACCOUNTS.append((acc_no, client, phone))
+        asyncio.create_task(client.run_until_disconnected())
+        log.info(f"✅ [新账号{acc_no}] 添加成功: {me.first_name} (@{me.username})")
+        await bot.send_message(
+            owner_entity,
+            f"✅ [账号{acc_no}] 添加成功: {me.first_name} (@{me.username})\n"
+            f"已上线，可直接使用群发功能。当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线。",
+        )
+    except PhoneNumberInvalidError:
+        await bot.send_message(owner_entity, "❌ 手机号无效（Telegram 不认可），请检查国家码")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    except Exception as e:
+        log.error(f"❌ [新账号] 添加异常: {e}")
+        try:
+            await bot.send_message(owner_entity, f"❌ 添加异常: {e}")
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 def register_handlers(bot, accounts):
     # accounts: list of (account_no, client, phone)
 
@@ -1263,30 +1335,22 @@ def register_handlers(bot, accounts):
         action = KBD_ACTIONS[text]
 
         # 需要等待输入的操作
-        INPUT_ACTIONS = {"sendto", "broadcast"}
+        INPUT_ACTIONS = {"sendto", "broadcast", "addaccount"}
         INPUT_HINTS = {
             "sendto": "请输入要群发的消息内容（可多行）：",
             "broadcast": "请输入 <群1,群2> <内容> （群名用逗号分隔）：",
+            "addaccount": "请输入要添加的账号手机号（含国家码，如 +8613800138000）：",
         }
 
         if action in INPUT_ACTIONS:
-            if _no_accounts(event):
+            if action != "addaccount" and _no_accounts(event):
                 return
             pending_input[event.sender_id] = {"action": action, "hint": INPUT_HINTS[action]}
             await _reply(event, INPUT_HINTS[action])
             return
 
         # 即时执行的操作
-        if action == "addaccount":
-            await _reply(event,
-                "添加账号\n\n"
-                "1. 在 Zeabur 环境变量里添加 ACCOUNT_N_PHONE（N 为下一个可用序号）\n"
-                "2. 重启服务（或等热加载）\n"
-                "3. 发送 /login N —— 验证码会发到这里，直接回复数字\n"
-                "4. 如开了二步验证，再回复密码\n\n"
-                "登录成功后自动上线，无需本地生成 session。"
-            )
-        elif action == "accstatus":
+        if action == "accstatus":
             if _no_accounts(event):
                 return
             await _reply(event, await _acc_status_text(accounts))
@@ -1374,6 +1438,11 @@ def register_handlers(bot, accounts):
             await _reply(event, "正在读取群成员到名单…")
             collect_result = await collect_members(accounts[0][1], text)
             await _reply(event, collect_result)
+
+        elif action == "addaccount":
+            # 交互式添加账号：手机号 → 验证码 → （2FA）→ 上线
+            await _reply(event, f"🔄 开始添加账号 {text} …")
+            await _add_account_interactive(bot, text, event.chat_id)
 
     # ---- 自动识别群链接（兼容直接发链接，也走 addgroup 流程） ----
     @bot.on(events.NewMessage())
