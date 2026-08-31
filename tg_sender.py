@@ -1381,6 +1381,7 @@ async def main():
                     "⚠️ 服务器上还没有可用的 session。\n"
                     "请在本地运行 make_session.py 生成 session（会自动打包成 tg_sessions.zip），"
                     "然后把 tg_sessions.zip 直接发送给我，我会自动解压并加载，无需重新部署。",
+                    buttons=_menu_buttons(),
                 )
             except Exception:
                 pass
@@ -1398,7 +1399,9 @@ async def main():
     ACTIVE_ACCOUNTS.extend(ready)
     await bot.send_message(
         OWNER_ID,
-        f"🟢 群发系统已上线，{len(ready)}/{N} 个账号可用。发 /start 查看指令",
+        f"🟢 群发系统已上线，{len(ready)}/{N} 个账号可用。\n"
+        "下方按钮可直接操作；需要输入的功能，点按钮后按提示回复内容。",
+        buttons=_menu_buttons(),
     )
 
     # ---- 运行时热替换：监听新 zip 到达，断开旧客户端、重新加载 ----
