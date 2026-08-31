@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.zeabur.app/template.json",
+  "name": "tg-sender",
+  "description": "Telegram 群发推广系统（Bot 控制 + 用户号发送）",
+  "service": {
+    "type": "service",
+    "port": 8080
+  },
+  "healthcheck": {
+    "path": "/",
+    "interval": 30
+  }
+}

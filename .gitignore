@@ -1,0 +1,25 @@
+# ===== Session 生成器模块（仅本地保留，不上传 GitHub）=====
+make_session.py
+make_session_gui.py
+启动Session生成器.bat
+sessions/
+output/
+tg_sessions.zip
+config.py
+
+# Session 文件（敏感：包含登录态，切勿公开提交）
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 日志
+*.log
+
+# 其他
+.DS_Store
