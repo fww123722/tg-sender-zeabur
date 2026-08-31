@@ -29,6 +29,7 @@ import random
 import re
 import sys
 import threading
+import time
 import zipfile
 from datetime import date
 from logging.handlers import RotatingFileHandler
@@ -38,10 +39,10 @@ import psycopg2
 import psycopg2.pool
 from telethon import TelegramClient, events
 from telethon.errors import (
-    ChatInviteRequestError,
     FloodWaitError,
     InviteHashExpiredError,
     InviteHashInvalidError,
+    InviteRequestSentError,
     UserAlreadyParticipantError,
 )
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -173,57 +174,77 @@ class DB:
     _pool = None
 
     @classmethod
-    def init(cls):
+    def init(cls, max_retries: int = 30, retry_delay: int = 5):
+        """初始化连接池并建表。PostgreSQL 可能比本服务晚就绪，带重试。"""
         dsn = DATABASE_URL
         if "keepalives" not in dsn:
             sep = "&" if "?" in dsn else "?"
             dsn = f"{dsn}{sep}keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3"
-        cls._pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=dsn)
-        with cls._pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS targets (
-                        uid TEXT PRIMARY KEY,
-                        username TEXT DEFAULT '',
-                        access_hash BIGINT DEFAULT 0,
-                        created_at TIMESTAMPTZ DEFAULT now()
-                    )
-                """)
-                # 兼容已存在的旧表：补上 access_hash 列
-                cur.execute("""
-                    ALTER TABLE targets ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0
-                """)
-                # 每个账号的发送记录：account_no + uid 组合唯一
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS sent_log (
-                        account_no INT NOT NULL,
-                        uid TEXT NOT NULL,
-                        sent_at TIMESTAMPTZ DEFAULT now(),
-                        PRIMARY KEY (account_no, uid)
-                    )
-                """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS stats (
-                        stat_date DATE NOT NULL,
-                        account_no INT NOT NULL,
-                        sent_today INT DEFAULT 0,
-                        total_sent BIGINT DEFAULT 0,
-                        PRIMARY KEY (stat_date, account_no)
-                    )
-                """)
-                # 群组信息表
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS groups_info (
-                        group_id BIGINT PRIMARY KEY,
-                        title TEXT DEFAULT '',
-                        username TEXT DEFAULT '',
-                        member_count INT DEFAULT 0,
-                        creator_uid TEXT DEFAULT '',
-                        created_at TIMESTAMPTZ DEFAULT now()
-                    )
-                """)
-            conn.commit()
-        log.info(f"🗄️ PostgreSQL 已连接，共检测到 {N_ACCOUNTS} 个账号")
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                if cls._pool is not None:
+                    try:
+                        cls._pool.closeall()
+                    except Exception:
+                        pass
+                cls._pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=dsn)
+                with cls._pool.getconn() as conn:
+                    with conn.cursor() as cur:
+                        cls._create_tables(cur)
+                    conn.commit()
+                log.info("🗄️ PostgreSQL 已连接")
+                return
+            except Exception as e:
+                last_err = e
+                log.warning(f"⏳ 数据库连接失败（第 {attempt}/{max_retries} 次）: {e}")
+                time.sleep(retry_delay)
+        log.error(f"❌ 数据库连接重试耗尽: {last_err}")
+        raise last_err
+
+    @classmethod
+    def _create_tables(cls, cur):
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS targets (
+                uid TEXT PRIMARY KEY,
+                username TEXT DEFAULT '',
+                access_hash BIGINT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        # 兼容已存在的旧表：补上 access_hash 列
+        cur.execute("""
+            ALTER TABLE targets ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0
+        """)
+        # 每个账号的发送记录：account_no + uid 组合唯一
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_log (
+                account_no INT NOT NULL,
+                uid TEXT NOT NULL,
+                sent_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (account_no, uid)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS stats (
+                stat_date DATE NOT NULL,
+                account_no INT NOT NULL,
+                sent_today INT DEFAULT 0,
+                total_sent BIGINT DEFAULT 0,
+                PRIMARY KEY (stat_date, account_no)
+            )
+        """)
+        # 群组信息表
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS groups_info (
+                group_id BIGINT PRIMARY KEY,
+                title TEXT DEFAULT '',
+                username TEXT DEFAULT '',
+                member_count INT DEFAULT 0,
+                creator_uid TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
 
     @classmethod
     def getconn(cls):
@@ -530,7 +551,7 @@ async def join_group_by_link(client, link):
                     entity = await client.get_entity(title) if title else None
                     await _save_group_info(client, entity)
                     return f"✅ 已加入「{title}」"
-                except ChatInviteRequestError:
+                except InviteRequestSentError:
                     return f"⏳ 已向「{title}」发送入群申请，等待群主批准"
             try:
                 await client(ImportChatInviteRequest(invite_hash))
@@ -554,7 +575,7 @@ async def join_group_by_link(client, link):
             except UserAlreadyParticipantError:
                 title, cnt = await _save_group_info(client, entity)
                 return f"✅ 已在「{title}」中，成员 {cnt} 人"
-            except ChatInviteRequestError:
+            except InviteRequestSentError:
                 return f"⏳ 已向「{getattr(entity, 'title', token)}」发送入群申请，等待批准"
         else:
             return f"❌ 无法识别的群链接: {link}"

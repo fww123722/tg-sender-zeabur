@@ -1,2 +1,3 @@
-telethon>=1.34.0
+telethon==1.44.0
 psycopg2-binary>=2.9.9
+python-socks[asyncio]>=2.4.0
