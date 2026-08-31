@@ -998,6 +998,16 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                     await client.sign_in(password=pwd.strip())
                     signed_in = True
                     break
+                except Exception as e:
+                    estr = str(e)
+                    if "PHONE_CODE_INVALID" in estr or "code was previously shared" in estr:
+                        await bot.send_message(
+                            owner_entity,
+                            "🚫 Telegram 风控拦截：该验证码被判定为「已共享/泄露」，本次登录被拒绝。\n"
+                            "正在重新发送新验证码…请只在本对话回复新验证码，不要在其他任何地方输入。",
+                        )
+                        continue
+                    raise
 
             if not signed_in:
                 continue
@@ -1082,9 +1092,28 @@ async def _add_account_interactive(bot, phone, owner_entity):
                 await client.sign_in(password=pwd.strip())
                 signed_in = True
                 break
+            except Exception as e:
+                estr = str(e)
+                if "PHONE_CODE_INVALID" in estr or "code was previously shared" in estr or "PHONE_NUMBER_UNBLOCK" in estr:
+                    # Telegram 风控：验证码被判定为"已泄露/已共享"，本次码作废
+                    await bot.send_message(
+                        owner_entity,
+                        "🚫 Telegram 风控拦截：该验证码被判定为「已共享/泄露」，本次登录被拒绝。\n"
+                        "常见原因：验证码曾在其他设备/应用输入过，或 Telegram 判定登录环境可疑。\n\n"
+                        "正在重新发送新验证码…请只在本对话回复新验证码，不要在其他任何地方输入。",
+                    )
+                    continue
+                raise
 
         if not signed_in or not await client.is_user_authorized():
-            await bot.send_message(owner_entity, "❌ 验证码连续失败，添加中止。请稍后重新点「添加账号」")
+            await bot.send_message(
+                owner_entity,
+                "❌ 登录未完成。可能原因：\n"
+                "1. Telegram 风控拦截（检查该账号的 Telegram 官方通知）\n"
+                "2. 验证码过期/错误\n\n"
+                "建议：等 10-30 分钟后再试；登录时不要把验证码输入到其他任何 App/网站；"
+                "若官方通知里有「允许登录」选项，先去确认。",
+            )
             await client.disconnect()
             return
 
