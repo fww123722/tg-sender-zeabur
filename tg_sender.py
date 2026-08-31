@@ -901,13 +901,18 @@ def _menu_buttons():
     )
 
 
+async def _reply(event, *args, **kwargs):
+    """Telethon 1.44 移除了 Event.reply，统一用 client.send_message 实现"""
+    return await event.client.send_message(event.chat_id, *args, **kwargs)
+
+
 def register_handlers(bot, accounts):
     # accounts: list of (account_no, client, phone)
 
     def _no_accounts(event) -> bool:
         """账号未就绪时统一提示，返回 True 表示应终止处理"""
         if not accounts:
-            asyncio.ensure_future(event.reply(
+            asyncio.ensure_future(_reply(event,
                 "⚠️ 账号尚未就绪（等待 session 压缩包）。\n"
                 "请先把 tg_sessions.zip 发给我，加载完成后再操作。"
             ))
@@ -917,9 +922,9 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern="^/start$"))
     async def on_start(event):
         if event.sender_id != OWNER_ID:
-            await event.reply("⛔ 无权限")
+            await _reply(event, "⛔ 无权限")
             return
-        await event.reply(
+        await _reply(event, 
             "👋 群发系统已启动\n\n"
             f"📡 当前账号数: {len(accounts)}\n\n"
             "请使用下方按钮操作：\n"
@@ -939,7 +944,7 @@ def register_handlers(bot, accounts):
         if _no_accounts(event):
             return
         # 用第一个账号列出
-        await event.reply(await list_my_groups(accounts[0][1]))
+        await _reply(event, await list_my_groups(accounts[0][1]))
 
     @bot.on(events.NewMessage(pattern=r"^/collect ([\s\S]+)$"))
     async def on_collect(event):
@@ -949,13 +954,13 @@ def register_handlers(bot, accounts):
             return
         arg = event.pattern_match.group(1).strip()
         if state["busy"]:
-            await event.reply("⏳ 正在执行其他任务")
+            await _reply(event, "⏳ 正在执行其他任务")
             return
         state["busy"] = True
-        await event.reply("🔄 正在拉取成员，请稍候…")
+        await _reply(event, "🔄 正在拉取成员，请稍候…")
         try:
             result = await collect_members(accounts[0][1], arg)
-            await event.reply(result)
+            await _reply(event, result)
         finally:
             state["busy"] = False
 
@@ -963,7 +968,7 @@ def register_handlers(bot, accounts):
     async def on_list(event):
         if event.sender_id != OWNER_ID:
             return
-        await event.reply(_list_text())
+        await _reply(event, _list_text())
 
     @bot.on(events.NewMessage(pattern=r"^/sendto ([\s\S]+)$"))
     async def on_sendto(event):
@@ -973,26 +978,26 @@ def register_handlers(bot, accounts):
             return
         text = event.pattern_match.group(1).strip()
         if not text:
-            await event.reply("❌ 内容为空")
+            await _reply(event, "❌ 内容为空")
             return
         if state["busy"]:
-            await event.reply("⏳ 正在执行其他任务")
+            await _reply(event, "⏳ 正在执行其他任务")
             return
         targets = db_load_targets()
         if not targets:
-            await event.reply("❌ 名单为空，先用 /collect 收集")
+            await _reply(event, "❌ 名单为空，先用 /collect 收集")
             return
         state["busy"] = True
         state["paused"] = False
         state["stop"] = False
-        await event.reply(
+        await _reply(event, 
             f"🚀 开始多账号群发：{len(accounts)}个账号 | 目标 {len(targets)} 人 | "
             f"间隔 {state['min_delay']}-{state['max_delay']}s\n"
             "目标将轮流分配给各账号，账号越多越快。"
         )
         try:
             result = await send_to_list_multi(accounts, targets, text, event.chat_id)
-            await event.reply(result)
+            await _reply(event, result)
         finally:
             state["busy"] = False
 
@@ -1005,17 +1010,17 @@ def register_handlers(bot, accounts):
         raw = event.pattern_match.group(1).strip()
         parts = raw.split(" ", 1)
         if len(parts) < 2:
-            await event.reply("❌ 用法: /broadcast <群1,群2> <内容>")
+            await _reply(event, "❌ 用法: /broadcast <群1,群2> <内容>")
             return
         groups, text = parts[0], parts[1]
         if state["busy"]:
-            await event.reply("⏳ 正在执行其他任务")
+            await _reply(event, "⏳ 正在执行其他任务")
             return
         state["busy"] = True
-        await event.reply(f"🚀 用账号1 广播到: {groups}")
+        await _reply(event, f"🚀 用账号1 广播到: {groups}")
         try:
             result = await broadcast_to_groups(accounts[0][1], groups, text, event.chat_id)
-            await event.reply(result)
+            await _reply(event, result)
         finally:
             state["busy"] = False
 
@@ -1027,17 +1032,17 @@ def register_handlers(bot, accounts):
             return
         parts = event.pattern_match.group(1).split()
         if len(parts) < 2:
-            await event.reply("❌ 用法: /forward <源频道> <目标群>")
+            await _reply(event, "❌ 用法: /forward <源频道> <目标群>")
             return
         src, dst = parts[0], parts[1]
         if state["busy"]:
-            await event.reply("⏳ 正在执行其他任务")
+            await _reply(event, "⏳ 正在执行其他任务")
             return
         state["busy"] = True
-        await event.reply("🔄 正在转发…")
+        await _reply(event, "🔄 正在转发…")
         try:
             result = await forward_from_channel(accounts[0][1], src, dst, event.chat_id)
-            await event.reply(result)
+            await _reply(event, result)
         finally:
             state["busy"] = False
 
@@ -1045,21 +1050,21 @@ def register_handlers(bot, accounts):
     async def on_stats(event):
         if event.sender_id != OWNER_ID:
             return
-        await event.reply(await _stats_text(accounts))
+        await _reply(event, await _stats_text(accounts))
 
     @bot.on(events.NewMessage(pattern="^/pause$"))
     async def on_pause(event):
         if event.sender_id != OWNER_ID:
             return
         state["paused"] = True
-        await event.reply("⏸ 已暂停")
+        await _reply(event, "⏸ 已暂停")
 
     @bot.on(events.NewMessage(pattern="^/resume$"))
     async def on_resume(event):
         if event.sender_id != OWNER_ID:
             return
         state["paused"] = False
-        await event.reply("▶️ 已继续")
+        await _reply(event, "▶️ 已继续")
 
     @bot.on(events.NewMessage(pattern=r"^/speed (\d+)$"))
     async def on_speed(event):
@@ -1068,14 +1073,14 @@ def register_handlers(bot, accounts):
         sec = int(event.pattern_match.group(1))
         state["min_delay"] = max(1, sec)
         state["max_delay"] = max(1, sec + 10)
-        await event.reply(f"⚡ 间隔已设为 {state['min_delay']}-{state['max_delay']}s")
+        await _reply(event, f"⚡ 间隔已设为 {state['min_delay']}-{state['max_delay']}s")
 
     @bot.on(events.NewMessage(pattern=r"^/quota (\d+)$"))
     async def on_quota(event):
         if event.sender_id != OWNER_ID:
             return
         state["daily_limit"] = int(event.pattern_match.group(1))
-        await event.reply(f"🎯 每账号今日上限已设为 {state['daily_limit']} 条")
+        await _reply(event, f"🎯 每账号今日上限已设为 {state['daily_limit']} 条")
 
     @bot.on(events.NewMessage(pattern="^/stop$"))
     async def on_stop(event):
@@ -1084,14 +1089,14 @@ def register_handlers(bot, accounts):
         state["stop"] = True
         state["paused"] = True
         state["busy"] = False
-        await event.reply("🛑 已停止当前任务（任务循环将在下次检测到停止标志时退出）")
+        await _reply(event, "🛑 已停止当前任务（任务循环将在下次检测到停止标志时退出）")
 
     # ---- 控制面板 /menu - 发送底部键盘并显示说明 ----
     @bot.on(events.NewMessage(pattern="^/menu$"))
     async def on_menu(event):
         if event.sender_id != OWNER_ID:
             return
-        await event.reply(MENU_TEXT, buttons=_menu_buttons())
+        await _reply(event, MENU_TEXT, buttons=_menu_buttons())
 
     # ---- 底部按钮文字处理（点击键盘按钮发出的就是这些文字） ----
     @bot.on(events.NewMessage())
@@ -1118,12 +1123,12 @@ def register_handlers(bot, accounts):
             if _no_accounts(event):
                 return
             pending_input[event.sender_id] = {"action": action, "hint": INPUT_HINTS[action]}
-            await event.reply(INPUT_HINTS[action])
+            await _reply(event, INPUT_HINTS[action])
             return
 
         # 即时执行的操作
         if action == "addaccount":
-            await event.reply(
+            await _reply(event, 
                 "添加账号：\n\n"
                 "1. 在本地 config.py 添加 ACCOUNT_N_PHONE 并填写新手机号\n"
                 "2. 运行 python make_session.py --force N\n"
@@ -1134,20 +1139,20 @@ def register_handlers(bot, accounts):
         elif action == "accstatus":
             if _no_accounts(event):
                 return
-            await event.reply(await _acc_status_text(accounts))
+            await _reply(event, await _acc_status_text(accounts))
         elif action == "groupstatus":
-            await event.reply(_group_status_text())
+            await _reply(event, _group_status_text())
         elif action == "pause":
             state["paused"] = True
-            await event.reply("已暂停（发「继续」恢复）")
+            await _reply(event, "已暂停（发「继续」恢复）")
         elif action == "resume":
             state["paused"] = False
-            await event.reply("已继续")
+            await _reply(event, "已继续")
         elif action == "stop":
             state["stop"] = True
             state["paused"] = True
             state["busy"] = False
-            await event.reply("已停止当前任务")
+            await _reply(event, "已停止当前任务")
         else:
             return
 
@@ -1172,53 +1177,53 @@ def register_handlers(bot, accounts):
         if _no_accounts(event):
             return
         if state["busy"]:
-            await event.reply("当前正在执行其他任务，请稍后再试")
+            await _reply(event, "当前正在执行其他任务，请稍后再试")
             return
 
         if action == "sendto":
             targets = db_load_targets()
             if not targets:
-                await event.reply("名单为空，请先在按钮中点击「拉取群成员」收集")
+                await _reply(event, "名单为空，请先在按钮中点击「拉取群成员」收集")
                 return
             state["busy"] = True
             state["paused"] = False
             state["stop"] = False
-            await event.reply(
+            await _reply(event, 
                 f"开始多账号群发：{len(accounts)}个账号 | 目标 {len(targets)} 人 | "
                 f"间隔 {state['min_delay']}-{state['max_delay']}s"
             )
             try:
                 result = await send_to_list_multi(accounts, targets, text, event.chat_id)
-                await event.reply(result)
+                await _reply(event, result)
             finally:
                 state["busy"] = False
 
         elif action == "broadcast":
             parts = text.split(" ", 1)
             if len(parts) < 2:
-                await event.reply("格式错误，请用「群1,群2 内容」的格式发送")
+                await _reply(event, "格式错误，请用「群1,群2 内容」的格式发送")
                 return
             groups, msg = parts[0], parts[1]
             state["busy"] = True
-            await event.reply(f"正在广播到: {groups}")
+            await _reply(event, f"正在广播到: {groups}")
             try:
                 result = await broadcast_to_groups(accounts[0][1], groups, msg, event.chat_id)
-                await event.reply(result)
+                await _reply(event, result)
             finally:
                 state["busy"] = False
 
         elif action == "addgroup":
             if state["busy"]:
-                await event.reply("当前正在执行其他任务，稍后再试")
+                await _reply(event, "当前正在执行其他任务，稍后再试")
                 return
-            await event.reply("正在用主账号加入群组并读取信息，请稍候…")
+            await _reply(event, "正在用主账号加入群组并读取信息，请稍候…")
             # 先加群
             join_result = await join_group_by_link(accounts[0][1], text)
-            await event.reply(join_result)
+            await _reply(event, join_result)
             # 再尝试拉取群成员到名单
-            await event.reply("正在读取群成员到名单…")
+            await _reply(event, "正在读取群成员到名单…")
             collect_result = await collect_members(accounts[0][1], text)
-            await event.reply(collect_result)
+            await _reply(event, collect_result)
 
     # ---- 自动识别群链接（兼容直接发链接，也走 addgroup 流程） ----
     @bot.on(events.NewMessage())
@@ -1238,13 +1243,13 @@ def register_handlers(bot, accounts):
         if _no_accounts(event):
             return
         if state["busy"]:
-            await event.reply("当前正在执行其他任务，请稍后再试")
+            await _reply(event, "当前正在执行其他任务，请稍后再试")
             return
-        await event.reply("检测到群链接，正在用主账号加入并读取成员…")
+        await _reply(event, "检测到群链接，正在用主账号加入并读取成员…")
         join_result = await join_group_by_link(accounts[0][1], link)
-        await event.reply(join_result)
+        await _reply(event, join_result)
         collect_result = await collect_members(accounts[0][1], link)
-        await event.reply(collect_result)
+        await _reply(event, collect_result)
 
 
 def _extract_session_zip(download_path):
@@ -1301,20 +1306,20 @@ async def _register_zip_receiver(bot):
             pass
         if not (mime_type.endswith("zip") or fname.endswith(".zip")):
             return
-        await event.reply("📦 收到 session 压缩包，正在解压…")
+        await _reply(event, "📦 收到 session 压缩包，正在解压…")
         try:
             dl = await event.download_media(file=os.path.join(DATA_DIR, "_incoming.zip"))
             if not dl:
-                await event.reply("❌ 下载失败")
+                await _reply(event, "❌ 下载失败")
                 return
             cnt, err = _extract_session_zip(dl)
             if err:
-                await event.reply(f"❌ 解压失败: {err}")
+                await _reply(event, f"❌ 解压失败: {err}")
                 return
             ZIP_RECEIVED.set()
-            await event.reply(f"✅ 已解压 {cnt} 个 session 文件。正在重新加载…")
+            await _reply(event, f"✅ 已解压 {cnt} 个 session 文件。正在重新加载…")
         except Exception as e:
-            await event.reply(f"❌ 处理压缩包失败: {e}")
+            await _reply(event, f"❌ 处理压缩包失败: {e}")
 
 
 def _find_session(acc_no: int) -> str:
