@@ -1010,7 +1010,7 @@ def register_handlers(bot, accounts):
         if event.sender_id != OWNER_ID:
             await _reply(event, "⛔ 无权限")
             return
-        await _reply(event, 
+        await _reply(event,
             "👋 群发系统已启动\n\n"
             f"📡 当前账号数: {len(accounts)}\n\n"
             "请使用下方按钮操作：\n"
@@ -1020,6 +1020,15 @@ def register_handlers(bot, accounts):
             "· 群组状态：查看所有已加入的群组与成员数\n"
             "· 暂停 / 继续 / 停止任务\n\n"
             "登录账号：/login（全部）或 /login 2（指定序号）",
+            buttons=_menu_buttons(),
+        )
+
+    @bot.on(events.NewMessage(pattern="^/mygroups$"))
+    async def on_mygroups(event):
+        if event.sender_id != OWNER_ID:
+            return
+        if _no_accounts(event):
+            return
         # 用第一个账号列出
         await _reply(event, await list_my_groups(accounts[0][1]))
 
