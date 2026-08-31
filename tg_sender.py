@@ -925,15 +925,16 @@ def _menu_buttons():
 
 
 def _submenu_buttons(main_btn):
-    """子菜单键盘：子按钮 + 返回主菜单"""
+    """子菜单键盘：子按钮 + 返回主菜单。
+    暂停/继续/停止任务仅属于群发功能（私聊群发/群组广播运行时控制）。"""
     if main_btn == "群发功能":
-        rows = [BTN_SUB["群发功能"], ("停止任务",)]
+        rows = [BTN_SUB["群发功能"], ("暂停", "继续", "停止任务")]
     elif main_btn == "添加群组":
-        rows = [("添加群组",), ("暂停", "继续")]
+        rows = [("添加群组",)]
     elif main_btn == "账号状态":
-        rows = [BTN_SUB["账号状态"], ("暂停", "继续")]
+        rows = [BTN_SUB["账号状态"]]
     elif main_btn == "群组状态":
-        rows = [("群组状态", "暂停", "继续", "停止任务")]
+        rows = [("群组状态",)]
     else:
         rows = [BTN_MAIN]
     return _kb(rows + [BTN_MAIN])
@@ -1083,8 +1084,8 @@ def register_handlers(bot, accounts):
         """账号未就绪时统一提示，返回 True 表示应终止处理"""
         if not accounts:
             asyncio.ensure_future(_reply(event,
-                "⚠️ 账号尚未就绪（等待 session 压缩包）。\n"
-                "请先把 tg_sessions.zip 发给我，加载完成后再操作。"
+                "⚠️ 当前没有可用账号。\n"
+                "请点「账号状态」→「添加账号」，输入手机号即可登录。"
             ))
             return True
         return False
@@ -1388,6 +1389,12 @@ def register_handlers(bot, accounts):
         action = inp["action"]
         del pending_input[event.sender_id]
 
+        # 添加账号不需要已有账号，也不受 busy 限制（首次添加时必然无账号）
+        if action == "addaccount":
+            await _reply(event, f"🔄 开始添加账号 {text} …")
+            await _add_account_interactive(bot, text, event.chat_id)
+            return
+
         if _no_accounts(event):
             return
         if state["busy"]:
@@ -1397,7 +1404,7 @@ def register_handlers(bot, accounts):
         if action == "sendto":
             targets = db_load_targets()
             if not targets:
-                await _reply(event, "名单为空，请先在按钮中点击「拉取群成员」收集")
+                await _reply(event, "名单为空。请先点「添加群组」加入群并拉取成员，再回来群发。")
                 return
             state["busy"] = True
             state["paused"] = False
@@ -1438,11 +1445,6 @@ def register_handlers(bot, accounts):
             await _reply(event, "正在读取群成员到名单…")
             collect_result = await collect_members(accounts[0][1], text)
             await _reply(event, collect_result)
-
-        elif action == "addaccount":
-            # 交互式添加账号：手机号 → 验证码 → （2FA）→ 上线
-            await _reply(event, f"🔄 开始添加账号 {text} …")
-            await _add_account_interactive(bot, text, event.chat_id)
 
     # ---- 自动识别群链接（兼容直接发链接，也走 addgroup 流程） ----
     @bot.on(events.NewMessage())
