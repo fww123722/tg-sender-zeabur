@@ -1343,21 +1343,41 @@ async def main():
     start_health_server()
     DB.init()
 
-    bot = TelegramClient(os.path.join(DATA_DIR, "bot_session.session"), API_ID, API_HASH)
-    try:
-        await bot.start(bot_token=BOT_TOKEN)
-        me_bot = await bot.get_me()
-        log.info(f"🤖 控制 Bot 已连接: @{me_bot.username}")
-    except Exception as e:
-        estr = str(e)
-        if "API_ID_INVALID" in estr or "api_id" in estr.lower():
-            log.error("❌ Bot 连接失败: API_ID/API_HASH 无效。请核对 my.telegram.org 的值是否正确。")
-        elif "TOKEN_INVALID" in estr or "token" in estr.lower():
-            log.error("❌ Bot 连接失败: BOT_TOKEN 无效。请用 @BotFather 重新获取 token。")
-        else:
-            log.error(f"❌ Bot 连接失败: {e}")
-        # 非零退出码，让 Zeabur 自动重启重试（可能是暂时性网络问题）
-        sys.exit(1)
+    bot_session_path = os.path.join(DATA_DIR, "bot_session.session")
+    bot = TelegramClient(bot_session_path, API_ID, API_HASH)
+    for attempt in (1, 2):
+        try:
+            await bot.start(bot_token=BOT_TOKEN)
+            me_bot = await bot.get_me()
+            log.info(f"🤖 控制 Bot 已连接: @{me_bot.username}")
+            break
+        except Exception as e:
+            estr = str(e)
+            if "AUTH_KEY_UNREGISTERED" in estr and attempt == 1:
+                # 服务器上的 bot_session 已失效（被注销或残留旧 session）：
+                # 删除后重试一次，Bot 会用 BOT_TOKEN 重新登录，无需人工干预
+                log.warning("⚠️ bot_session 已失效（AUTH_KEY_UNREGISTERED），删除后重新登录…")
+                try:
+                    await bot.disconnect()
+                except Exception:
+                    pass
+                for suffix in ("", "-journal"):
+                    p = bot_session_path + suffix
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                bot = TelegramClient(bot_session_path, API_ID, API_HASH)
+                continue
+            if "API_ID_INVALID" in estr or "api_id" in estr.lower():
+                log.error("❌ Bot 连接失败: API_ID/API_HASH 无效。请核对 my.telegram.org 的值是否正确。")
+            elif "TOKEN_INVALID" in estr or "token" in estr.lower():
+                log.error("❌ Bot 连接失败: BOT_TOKEN 无效。请用 @BotFather 重新获取 token。")
+            else:
+                log.error(f"❌ Bot 连接失败: {e}")
+            # 非零退出码，让 Zeabur 自动重启重试（可能是暂时性网络问题）
+            sys.exit(1)
 
     # 先注册 zip 接收 handler：owner 可在任意时刻把本地打包的 tg_sessions.zip 发给 Bot
     await _register_zip_receiver(bot)
