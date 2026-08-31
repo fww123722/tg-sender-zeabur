@@ -54,6 +54,7 @@ from telethon.tl.types import (
     ChatInviteAlready,
     InputPeerUser,
     KeyboardButton,
+    KeyboardButtonRow,
     ReplyKeyboardMarkup,
     User,
 )
@@ -889,13 +890,14 @@ pending_input = {}
 
 
 def _menu_buttons():
-    """底部回复键盘（常驻输入框下方，点击即发送按钮文字）"""
+    """底部回复键盘（常驻输入框下方，点击即发送按钮文字）。
+    注意：Telethon 1.44 不再自动把嵌套 list 转成 KeyboardButtonRow，必须显式包装。"""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("私聊群发"), KeyboardButton("群组广播")],
-            [KeyboardButton("添加群组")],
-            [KeyboardButton("添加账号"), KeyboardButton("实时状态")],
-            [KeyboardButton("群组状态"), KeyboardButton("暂停"), KeyboardButton("继续"), KeyboardButton("停止任务")],
+            KeyboardButtonRow([KeyboardButton("私聊群发"), KeyboardButton("群组广播")]),
+            KeyboardButtonRow([KeyboardButton("添加群组")]),
+            KeyboardButtonRow([KeyboardButton("添加账号"), KeyboardButton("实时状态")]),
+            KeyboardButtonRow([KeyboardButton("群组状态"), KeyboardButton("暂停"), KeyboardButton("继续"), KeyboardButton("停止任务")]),
         ],
         resize=True,
     )
