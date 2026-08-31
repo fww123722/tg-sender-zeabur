@@ -173,7 +173,7 @@ def _auth_key(acc_no, kind):
     return (acc_no, kind)
 
 
-async def ask_owner(bot, prompt, acc_no, kind, timeout=180):
+async def ask_owner(bot, prompt, acc_no, kind, timeout=300):
     """向 owner 提问并等待回复（验证码/密码/手机号）。超时返回 None。"""
     key = _auth_key(acc_no, kind)
     ev = asyncio.Event()
@@ -920,12 +920,12 @@ def _kb(rows):
 
 
 def _menu_buttons():
-    """主菜单：只显示 4 个主按钮"""
-    return _kb([BTN_MAIN])
+    """主菜单：4 个主按钮，2 个一行"""
+    return _kb([(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])])
 
 
 def _submenu_buttons(main_btn):
-    """子菜单键盘：子按钮 + 返回主菜单。
+    """子菜单键盘：子按钮 + 主菜单（2 个一行，始终保留）。
     暂停/继续/停止任务仅属于群发功能（私聊群发/群组广播运行时控制）。"""
     if main_btn == "群发功能":
         rows = [BTN_SUB["群发功能"], ("暂停", "继续", "停止任务")]
@@ -936,8 +936,8 @@ def _submenu_buttons(main_btn):
     elif main_btn == "群组状态":
         rows = [("群组状态",)]
     else:
-        rows = [BTN_MAIN]
-    return _kb(rows + [BTN_MAIN])
+        rows = [(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])]
+    return _kb(rows + [(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])])
 
 
 async def _reply(event, *args, **kwargs):
