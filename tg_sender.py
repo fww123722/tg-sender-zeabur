@@ -925,8 +925,9 @@ def _menu_buttons():
 
 
 def _submenu_buttons(main_btn):
-    """子菜单键盘：子按钮 + 主菜单（2 个一行，始终保留）。
-    暂停/继续/停止任务仅属于群发功能（私聊群发/群组广播运行时控制）。"""
+    """子菜单键盘：只显示子按钮（不含主菜单按钮）。
+    暂停/继续/停止任务仅属于群发功能（私聊群发/群组广播运行时控制）。
+    返回主菜单：发 /menu 或 /start。"""
     if main_btn == "群发功能":
         rows = [BTN_SUB["群发功能"], ("暂停", "继续", "停止任务")]
     elif main_btn == "添加群组":
@@ -937,7 +938,7 @@ def _submenu_buttons(main_btn):
         rows = [("群组状态",)]
     else:
         rows = [(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])]
-    return _kb(rows + [(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])])
+    return _kb(rows)
 
 
 async def _reply(event, *args, **kwargs):
