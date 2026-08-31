@@ -878,53 +878,65 @@ def _list_text() -> str:
 
 MENU_TEXT = (
     "控制面板\n\n"
-    "群发功能\n"
-    "  · 私聊群发  私信名单内所有目标\n"
-    "  · 群组广播  发送到指定群组\n\n"
-    "添加群组\n"
-    "  · 发送群链接或ID，主账号自动加群并读取群信息与成员\n\n"
-    "账号状态\n"
-    "  · 添加账号  查看如何添加账号\n"
-    "  · 实时状态  各账号 可用/冻结/双向 状态\n\n"
-    "群组状态\n"
-    "  · 展示所有已加入的群组及已读取的成员数\n\n"
-    "点击下方按钮操作；需要输入的功能，点击后再回复内容即可"
+    "点击下方主按钮进入功能：\n"
+    "· 群发功能 — 私聊群发 / 群组广播\n"
+    "· 添加群组 — 加群并读取群信息与成员\n"
+    "· 账号状态 — 添加账号 / 实时状态\n"
+    "· 群组状态 — 已加入群组与成员数\n\n"
+    "登录账号：/login（全部）或 /login 2（指定序号）"
 )
 
-# 底部按钮文字 → 动作映射
+# 按钮点击后等待 owner 输入的会话状态: {chat_id: {"action": str, "hint": str}}
+pending_input = {}
+
+# ---- 二级菜单键盘 ----
+# 主菜单：4 个主按钮
+BTN_MAIN = ("群发功能", "添加群组", "账号状态", "群组状态")
+# 子菜单按钮
+BTN_SUB = {
+    "群发功能": ("私聊群发", "群组广播"),
+    "账号状态": ("添加账号", "实时状态"),
+}
+# 所有按钮 → 动作
 KBD_ACTIONS = {
-    # 群发功能
     "私聊群发": "sendto",
     "群组广播": "broadcast",
-    # 添加群组
     "添加群组": "addgroup",
-    # 账号状态
     "添加账号": "addaccount",
     "实时状态": "accstatus",
-    # 群组状态
     "群组状态": "groupstatus",
-    # 其他
     "暂停": "pause",
     "继续": "resume",
     "停止任务": "stop",
 }
 
-# 按钮点击后等待 owner 输入的会话状态: {chat_id: {"action": str, "hint": str}}
-pending_input = {}
+
+def _kb(rows):
+    """由按钮文字构造回复键盘（Telethon 1.44 需显式 KeyboardButtonRow）"""
+    return ReplyKeyboardMarkup(
+        [KeyboardButtonRow([KeyboardButton(t) for t in row]) for row in rows],
+        resize=True,
+    )
 
 
 def _menu_buttons():
-    """底部回复键盘（常驻输入框下方，点击即发送按钮文字）。
-    注意：Telethon 1.44 不再自动把嵌套 list 转成 KeyboardButtonRow，必须显式包装。"""
-    return ReplyKeyboardMarkup(
-        [
-            KeyboardButtonRow([KeyboardButton("私聊群发"), KeyboardButton("群组广播")]),
-            KeyboardButtonRow([KeyboardButton("添加群组")]),
-            KeyboardButtonRow([KeyboardButton("添加账号"), KeyboardButton("实时状态")]),
-            KeyboardButtonRow([KeyboardButton("群组状态"), KeyboardButton("暂停"), KeyboardButton("继续"), KeyboardButton("停止任务")]),
-        ],
-        resize=True,
-    )
+    """主菜单：只显示 4 个主按钮"""
+    return _kb([BTN_MAIN])
+
+
+def _submenu_buttons(main_btn):
+    """子菜单键盘：子按钮 + 返回主菜单"""
+    if main_btn == "群发功能":
+        rows = [BTN_SUB["群发功能"], ("停止任务",)]
+    elif main_btn == "添加群组":
+        rows = [("添加群组",), ("暂停", "继续")]
+    elif main_btn == "账号状态":
+        rows = [BTN_SUB["账号状态"], ("暂停", "继续")]
+    elif main_btn == "群组状态":
+        rows = [("群组状态", "暂停", "继续", "停止任务")]
+    else:
+        rows = [BTN_MAIN]
+    return _kb(rows + [BTN_MAIN])
 
 
 async def _reply(event, *args, **kwargs):
@@ -1211,25 +1223,50 @@ def register_handlers(bot, accounts):
                 info["event"].set()
                 return
 
-    # ---- 底部按钮文字处理（点击键盘按钮发出的就是这些文字） ----
+    # ---- 底部按钮处理（二级菜单：主按钮切键盘，子按钮执行动作） ----
     @bot.on(events.NewMessage())
     async def on_kbd(event):
         if event.sender_id != OWNER_ID:
             return
         text = (event.text or "").strip()
-        if not text or text not in KBD_ACTIONS:
+        if not text:
             return
-        # 若正在等待某个输入，底部按钮的点击也算一种新指令，取消旧 pending
+
+        # 1) 主按钮 → 切换到对应子菜单键盘
+        if text in BTN_MAIN:
+            if event.sender_id in pending_input:
+                del pending_input[event.sender_id]
+            if text == "添加群组":
+                # 添加群组：切键盘 + 直接引导输入
+                if _no_accounts(event):
+                    return
+                pending_input[event.sender_id] = {
+                    "action": "addgroup",
+                    "hint": "请发送群链接或群ID，主账号将尝试加群并读取群信息与成员：",
+                }
+                await _reply(event,
+                    "添加群组\n\n"
+                    "支持：公开群 t.me/xxx · 私密邀请 t.me/+xxx · 群ID\n"
+                    "加群成功后自动读取群信息并拉取成员到名单。\n\n"
+                    "请发送群链接或ID：",
+                    buttons=_submenu_buttons(text),
+                )
+            else:
+                await _reply(event, f"{text}\n\n请选择具体操作：", buttons=_submenu_buttons(text))
+            return
+
+        # 2) 子按钮 → 执行动作
+        if text not in KBD_ACTIONS:
+            return
         if event.sender_id in pending_input:
             del pending_input[event.sender_id]
         action = KBD_ACTIONS[text]
 
-        # 需要等待输入的操作：设置 pending_input，提示用户回复
-        INPUT_ACTIONS = {"sendto", "broadcast", "addgroup"}
+        # 需要等待输入的操作
+        INPUT_ACTIONS = {"sendto", "broadcast"}
         INPUT_HINTS = {
             "sendto": "请输入要群发的消息内容（可多行）：",
             "broadcast": "请输入 <群1,群2> <内容> （群名用逗号分隔）：",
-            "addgroup": "请输入群链接或群ID，主账号将尝试加群并读取群信息与成员：",
         }
 
         if action in INPUT_ACTIONS:
@@ -1242,7 +1279,7 @@ def register_handlers(bot, accounts):
         # 即时执行的操作
         if action == "addaccount":
             await _reply(event,
-                "添加账号：\n\n"
+                "添加账号\n\n"
                 "1. 在 Zeabur 环境变量里添加 ACCOUNT_N_PHONE（N 为下一个可用序号）\n"
                 "2. 重启服务（或等热加载）\n"
                 "3. 发送 /login N —— 验证码会发到这里，直接回复数字\n"
@@ -1257,7 +1294,7 @@ def register_handlers(bot, accounts):
             await _reply(event, _group_status_text())
         elif action == "pause":
             state["paused"] = True
-            await _reply(event, "已暂停（发「继续」恢复）")
+            await _reply(event, "已暂停（点「继续」恢复）")
         elif action == "resume":
             state["paused"] = False
             await _reply(event, "已继续")
@@ -1278,7 +1315,7 @@ def register_handlers(bot, accounts):
         if not text or text.startswith("/"):
             return
         # 底部按钮文字由 on_kbd 处理，不作为输入内容（避免刚点按钮就被消费）
-        if text in KBD_ACTIONS:
+        if text in KBD_ACTIONS or text in BTN_MAIN:
             return
         # 检查是否有 pending_input
         inp = pending_input.get(event.sender_id)
