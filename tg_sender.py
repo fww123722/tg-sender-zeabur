@@ -94,8 +94,21 @@ for env_key, env_val in sorted(os.environ.items()):
 N_ACCOUNTS = len(ACCS)
 
 if not (API_ID and API_HASH and BOT_TOKEN and OWNER_ID and DATABASE_URL):
+    # 逐项列出缺失的配置，方便在 Zeabur 日志里一眼定位
+    missing = []
+    if not API_ID:
+        missing.append("API_ID")
+    if not API_HASH:
+        missing.append("API_HASH")
+    if not BOT_TOKEN:
+        missing.append("BOT_TOKEN")
+    if not OWNER_ID:
+        missing.append("OWNER_ID")
+    if not DATABASE_URL:
+        missing.append("DATABASE_URL")
     logging.getLogger("tg_sender").error(
-        "❌ 缺少配置：请设置 API_ID / API_HASH / BOT_TOKEN / OWNER_ID / DATABASE_URL"
+        f"❌ 缺少必填环境变量: {', '.join(missing)}。"
+        "请在 Zeabur 控制台 -> 本服务 -> Variables 中添加后重新部署。"
     )
     sys.exit(1)
 if N_ACCOUNTS == 0:
@@ -1280,8 +1293,15 @@ async def main():
         me_bot = await bot.get_me()
         log.info(f"🤖 控制 Bot 已连接: @{me_bot.username}")
     except Exception as e:
-        log.error(f"❌ Bot 连接失败: {e}")
-        return
+        estr = str(e)
+        if "API_ID_INVALID" in estr or "api_id" in estr.lower():
+            log.error("❌ Bot 连接失败: API_ID/API_HASH 无效。请核对 my.telegram.org 的值是否正确。")
+        elif "TOKEN_INVALID" in estr or "token" in estr.lower():
+            log.error("❌ Bot 连接失败: BOT_TOKEN 无效。请用 @BotFather 重新获取 token。")
+        else:
+            log.error(f"❌ Bot 连接失败: {e}")
+        # 非零退出码，让 Zeabur 自动重启重试（可能是暂时性网络问题）
+        sys.exit(1)
 
     # 先注册 zip 接收 handler：owner 可在任意时刻把本地打包的 tg_sessions.zip 发给 Bot
     await _register_zip_receiver(bot)

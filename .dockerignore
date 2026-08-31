@@ -1,0 +1,22 @@
+# ===== 敏感文件：绝不进镜像 =====
+session-tool/
+sessions/
+output/
+*.session
+*.session-journal
+config.py
+
+# ===== 本地开发文件 =====
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.log
+.git/
+.gitignore
+.DS_Store
+
+# ===== 文档（无需进镜像）=====
+zeabur-deploy.md
+README.md
