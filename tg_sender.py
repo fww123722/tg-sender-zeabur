@@ -904,6 +904,16 @@ def _menu_buttons():
 def register_handlers(bot, accounts):
     # accounts: list of (account_no, client, phone)
 
+    def _no_accounts(event) -> bool:
+        """账号未就绪时统一提示，返回 True 表示应终止处理"""
+        if not accounts:
+            asyncio.ensure_future(event.reply(
+                "⚠️ 账号尚未就绪（等待 session 压缩包）。\n"
+                "请先把 tg_sessions.zip 发给我，加载完成后再操作。"
+            ))
+            return True
+        return False
+
     @bot.on(events.NewMessage(pattern="^/start$"))
     async def on_start(event):
         if event.sender_id != OWNER_ID:
@@ -926,12 +936,16 @@ def register_handlers(bot, accounts):
     async def on_mygroups(event):
         if event.sender_id != OWNER_ID:
             return
+        if _no_accounts(event):
+            return
         # 用第一个账号列出
         await event.reply(await list_my_groups(accounts[0][1]))
 
     @bot.on(events.NewMessage(pattern=r"^/collect ([\s\S]+)$"))
     async def on_collect(event):
         if event.sender_id != OWNER_ID:
+            return
+        if _no_accounts(event):
             return
         arg = event.pattern_match.group(1).strip()
         if state["busy"]:
@@ -954,6 +968,8 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern=r"^/sendto ([\s\S]+)$"))
     async def on_sendto(event):
         if event.sender_id != OWNER_ID:
+            return
+        if _no_accounts(event):
             return
         text = event.pattern_match.group(1).strip()
         if not text:
@@ -984,6 +1000,8 @@ def register_handlers(bot, accounts):
     async def on_broadcast(event):
         if event.sender_id != OWNER_ID:
             return
+        if _no_accounts(event):
+            return
         raw = event.pattern_match.group(1).strip()
         parts = raw.split(" ", 1)
         if len(parts) < 2:
@@ -1004,6 +1022,8 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern=r"^/forward ([\s\S]+)$"))
     async def on_forward(event):
         if event.sender_id != OWNER_ID:
+            return
+        if _no_accounts(event):
             return
         parts = event.pattern_match.group(1).split()
         if len(parts) < 2:
@@ -1095,6 +1115,8 @@ def register_handlers(bot, accounts):
         }
 
         if action in INPUT_ACTIONS:
+            if _no_accounts(event):
+                return
             pending_input[event.sender_id] = {"action": action, "hint": INPUT_HINTS[action]}
             await event.reply(INPUT_HINTS[action])
             return
@@ -1110,6 +1132,8 @@ def register_handlers(bot, accounts):
                 "无需重启服务器。"
             )
         elif action == "accstatus":
+            if _no_accounts(event):
+                return
             await event.reply(await _acc_status_text(accounts))
         elif action == "groupstatus":
             await event.reply(_group_status_text())
@@ -1145,6 +1169,8 @@ def register_handlers(bot, accounts):
         action = inp["action"]
         del pending_input[event.sender_id]
 
+        if _no_accounts(event):
+            return
         if state["busy"]:
             await event.reply("当前正在执行其他任务，请稍后再试")
             return
@@ -1209,6 +1235,8 @@ def register_handlers(bot, accounts):
         if not m:
             return
         link = m.group(0)
+        if _no_accounts(event):
+            return
         if state["busy"]:
             await event.reply("当前正在执行其他任务，请稍后再试")
             return
@@ -1372,31 +1400,36 @@ async def main():
 
     ready, failed = await load_accounts()
 
+    # 先注册指令 handler（含 /start /menu 等），让 owner 在等待 session 期间也能操作 Bot。
+    # handler 引用 ACTIVE_ACCOUNTS 模块级容器，账号加载/热替换后自动感知。
+    register_handlers(bot, ACTIVE_ACCOUNTS)
+    ACTIVE_ACCOUNTS.extend(ready)
+
     # 若有账号可用，直接上线；否则等待 owner 发送 session 压缩包
     if not ready:
+        try:
+            await bot.send_message(
+                OWNER_ID,
+                "⚠️ 服务器上还没有可用的 session。\n"
+                "请在本地运行 make_session.py 生成 session（会自动打包成 tg_sessions.zip），"
+                "然后把 tg_sessions.zip 直接发送给我，我会自动解压并加载，无需重新部署。",
+                buttons=_menu_buttons(),
+            )
+        except Exception:
+            pass
+        log.info("⏳ 等待 owner 发送 session 压缩包…")
         while not ready:
-            try:
-                await bot.send_message(
-                    OWNER_ID,
-                    "⚠️ 服务器上还没有可用的 session。\n"
-                    "请在本地运行 make_session.py 生成 session（会自动打包成 tg_sessions.zip），"
-                    "然后把 tg_sessions.zip 直接发送给我，我会自动解压并加载，无需重新部署。",
-                    buttons=_menu_buttons(),
-                )
-            except Exception:
-                pass
-            log.info("⏳ 等待 owner 发送 session 压缩包…")
             try:
                 await asyncio.wait_for(ZIP_RECEIVED.wait(), timeout=900)
             except asyncio.TimeoutError:
+                log.info("⏳ 仍在等待 session 压缩包…")
                 continue
             ZIP_RECEIVED.clear()
             log.info("📦 已收到 session 压缩包，尝试重新加载…")
             ready, failed = await load_accounts()
+            ACTIVE_ACCOUNTS.clear()
+            ACTIVE_ACCOUNTS.extend(ready)
 
-    # 注册 Bot 指令 handler（传入 ACTIVE_ACCOUNTS 模块级容器，热替换时自动感知）
-    register_handlers(bot, ACTIVE_ACCOUNTS)
-    ACTIVE_ACCOUNTS.extend(ready)
     await bot.send_message(
         OWNER_ID,
         f"🟢 群发系统已上线，{len(ready)}/{N} 个账号可用。\n"
