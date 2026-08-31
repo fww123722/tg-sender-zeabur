@@ -1657,20 +1657,30 @@ async def main():
             await bot.send_message(
                 OWNER_ID,
                 "⚠️ 服务器上还没有已登录的账号。\n\n"
-                f"两种方式登录：\n"
-                f"1️⃣ 直接发 /login —— 我会向 ACCOUNT_1_PHONE 发送验证码，你回复数字即可\n"
-                f"2️⃣ 发送 tg_sessions.zip（本地生成）—— 我会自动解压加载\n\n"
-                f"多账号用 /login 2、/login 3 … 指定序号。",
+                "两种方式添加账号：\n"
+                "1️⃣ 点「账号状态」→「添加账号」，直接发送手机号，验证码发到这里回复数字即可（推荐）\n"
+                "2️⃣ 发送 /login —— 向 ACCOUNT_1_PHONE（环境变量）发送验证码\n\n"
+                "登录成功后自动上线，无需重启。",
                 buttons=_menu_buttons(),
             )
         except Exception:
             pass
-        log.info("⏳ 等待账号登录（/login 或 session zip）…")
+        log.info("⏳ 等待账号登录（添加账号按钮 / /login / session zip）…")
+        remind_at = time.time() + 1800  # 每 30 分钟提醒一次
         while not ready:
             try:
-                await asyncio.wait_for(ZIP_RECEIVED.wait(), timeout=900)
+                await asyncio.wait_for(ZIP_RECEIVED.wait(), timeout=60)
             except asyncio.TimeoutError:
-                log.info("⏳ 仍在等待账号登录…")
+                # 定期提醒（/login 与按钮登录不触发 ZIP_RECEIVED，需要主动提醒）
+                if time.time() >= remind_at:
+                    try:
+                        await bot.send_message(
+                            OWNER_ID,
+                            "⏳ 仍未添加账号。点「账号状态」→「添加账号」发送手机号，或发 /login。",
+                        )
+                    except Exception:
+                        pass
+                    remind_at = time.time() + 1800
                 continue
             ZIP_RECEIVED.clear()
             log.info("📦 已收到 session 压缩包，尝试重新加载…")
