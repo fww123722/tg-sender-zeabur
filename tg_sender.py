@@ -177,7 +177,8 @@ async def ask_owner(bot, prompt, acc_no, kind, timeout=300):
     """向 owner 提问并等待回复（验证码/密码/手机号）。超时返回 None。"""
     key = _auth_key(acc_no, kind)
     ev = asyncio.Event()
-    AUTH_PENDING[key] = {"event": ev, "value": None}
+    entry = {"event": ev, "value": None}
+    AUTH_PENDING[key] = entry
     try:
         await bot.send_message(OWNER_ID, prompt)
         await asyncio.wait_for(ev.wait(), timeout=timeout)
@@ -185,7 +186,8 @@ async def ask_owner(bot, prompt, acc_no, kind, timeout=300):
         return None
     finally:
         AUTH_PENDING.pop(key, None)
-    return AUTH_PENDING.get(key, {}).get("value")
+    # 注意：从局部 entry 取值（AUTH_PENDING 已在 finally 中被清除）
+    return entry["value"]
 
 # 当前在线账号容器（(account_no, client, phone)）。
 # 热替换时原地 clear+extend，register_handlers 的闭包引用同一对象，自动感知变化。
