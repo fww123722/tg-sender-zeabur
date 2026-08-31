@@ -163,6 +163,30 @@ state = {
 # 收到 session 压缩包后置位（启动时缺 session 会等待此事件）
 ZIP_RECEIVED = asyncio.Event()
 
+# ---- 服务器端 Bot 交互登录辅助 ----
+# 结构: {(account_no, kind): {"event": asyncio.Event, "value": str|None}}
+# kind: phone / code / password
+AUTH_PENDING = {}
+
+
+def _auth_key(acc_no, kind):
+    return (acc_no, kind)
+
+
+async def ask_owner(bot, prompt, acc_no, kind, timeout=180):
+    """向 owner 提问并等待回复（验证码/密码/手机号）。超时返回 None。"""
+    key = _auth_key(acc_no, kind)
+    ev = asyncio.Event()
+    AUTH_PENDING[key] = {"event": ev, "value": None}
+    try:
+        await bot.send_message(OWNER_ID, prompt)
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        AUTH_PENDING.pop(key, None)
+    return AUTH_PENDING.get(key, {}).get("value")
+
 # 当前在线账号容器（(account_no, client, phone)）。
 # 热替换时原地 clear+extend，register_handlers 的闭包引用同一对象，自动感知变化。
 ACTIVE_ACCOUNTS = []
@@ -908,6 +932,66 @@ async def _reply(event, *args, **kwargs):
     return await event.client.send_message(event.chat_id, *args, **kwargs)
 
 
+async def _login_accounts(bot, accounts, targets, owner_entity):
+    """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
+    登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
+    from telethon.errors import SessionPasswordNeededError
+
+    for acc_no, client, phone in accounts:
+        if acc_no not in targets:
+            continue
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                await bot.send_message(owner_entity, f"⏭️ [账号{acc_no}] 已登录: {me.first_name} (@{me.username})，无需重复登录")
+                continue
+
+            # 1) 发送验证码
+            await bot.send_message(owner_entity, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…")
+            await client.send_code_request(phone)
+
+            # 2) 等 owner 回复验证码
+            code = await ask_owner(bot, f"🔐 [账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字）：", acc_no, "code")
+            if not code:
+                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 验证码输入超时，登录中止。可重新发 /login {acc_no}")
+                await client.disconnect()
+                continue
+
+            # 3) 登录（处理 2FA）
+            try:
+                await client.sign_in(phone, code.strip())
+            except SessionPasswordNeededError:
+                pwd = await ask_owner(bot, f"🔑 [账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
+                if not pwd:
+                    await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 密码输入超时，登录中止。可重新发 /login {acc_no}")
+                    await client.disconnect()
+                    continue
+                await client.sign_in(password=pwd.strip())
+
+            if not await client.is_user_authorized():
+                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录失败（验证码/密码错误）。可重新发 /login {acc_no}")
+                await client.disconnect()
+                continue
+
+            me = await client.get_me()
+            log.info(f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
+            await bot.send_message(owner_entity, f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
+
+            # 4) 加入在线列表并启动（若尚未在列）
+            exists = any(a[0] == acc_no for a in ACTIVE_ACCOUNTS)
+            if not exists:
+                ACTIVE_ACCOUNTS.append((acc_no, client, phone))
+                asyncio.create_task(client.run_until_disconnected())
+        except Exception as e:
+            log.error(f"❌ [账号{acc_no}] 登录异常: {e}")
+            try:
+                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录异常: {e}")
+                await client.disconnect()
+            except Exception:
+                pass
+
+
 def register_handlers(bot, accounts):
     # accounts: list of (account_no, client, phone)
 
@@ -935,16 +1019,7 @@ def register_handlers(bot, accounts):
             "· 账号状态：添加账号 / 实时状态（可用/冻结/双向）\n"
             "· 群组状态：查看所有已加入的群组与成员数\n"
             "· 暂停 / 继续 / 停止任务\n\n"
-            "高级命令仍可用：/sendto /broadcast /collect /stats 等",
-            buttons=_menu_buttons(),
-        )
-
-    @bot.on(events.NewMessage(pattern="^/mygroups$"))
-    async def on_mygroups(event):
-        if event.sender_id != OWNER_ID:
-            return
-        if _no_accounts(event):
-            return
+            "登录账号：/login（全部）或 /login 2（指定序号）",
         # 用第一个账号列出
         await _reply(event, await list_my_groups(accounts[0][1]))
 
@@ -1100,6 +1175,33 @@ def register_handlers(bot, accounts):
             return
         await _reply(event, MENU_TEXT, buttons=_menu_buttons())
 
+    # ---- 登录账号：/login [序号]（不带序号则登录所有未授权账号） ----
+    @bot.on(events.NewMessage(pattern=r"^/login(?:\s+(\d+))?$"))
+    async def on_login(event):
+        if event.sender_id != OWNER_ID:
+            return
+        if _no_accounts(event):
+            return
+        target = event.pattern_match.group(1)
+        targets = [int(target)] if target else [acc_no for acc_no, _c, _p in accounts]
+        await _reply(event, f"🔄 开始登录账号 {targets}，验证码将发到这里，直接回复数字即可…")
+        asyncio.ensure_future(_login_accounts(bot, accounts, targets, event.chat_id))
+
+    # ---- owner 回复分发：优先喂给等待中的登录提问（验证码/密码） ----
+    @bot.on(events.NewMessage())
+    async def on_auth_reply(event):
+        if event.sender_id != OWNER_ID:
+            return
+        text = (event.text or "").strip()
+        if not text or not AUTH_PENDING:
+            return
+        # 只把回复喂给最早发起的提问（同一时刻一般只有一个登录流程）
+        for key, info in sorted(AUTH_PENDING.items()):
+            if info["value"] is None:
+                info["value"] = text
+                info["event"].set()
+                return
+
     # ---- 底部按钮文字处理（点击键盘按钮发出的就是这些文字） ----
     @bot.on(events.NewMessage())
     async def on_kbd(event):
@@ -1130,13 +1232,13 @@ def register_handlers(bot, accounts):
 
         # 即时执行的操作
         if action == "addaccount":
-            await _reply(event, 
+            await _reply(event,
                 "添加账号：\n\n"
-                "1. 在本地 config.py 添加 ACCOUNT_N_PHONE 并填写新手机号\n"
-                "2. 运行 python make_session.py --force N\n"
-                "3. 按提示输入验证码\n"
-                "4. 把生成的 tg_sessions.zip 发给本 Bot，自动热替换\n\n"
-                "无需重启服务器。"
+                "1. 在 Zeabur 环境变量里添加 ACCOUNT_N_PHONE（N 为下一个可用序号）\n"
+                "2. 重启服务（或等热加载）\n"
+                "3. 发送 /login N —— 验证码会发到这里，直接回复数字\n"
+                "4. 如开了二步验证，再回复密码\n\n"
+                "登录成功后自动上线，无需本地生成 session。"
             )
         elif action == "accstatus":
             if _no_accounts(event):
@@ -1427,29 +1529,30 @@ async def main():
 
     ready, failed = await load_accounts()
 
-    # 先注册指令 handler（含 /start /menu 等），让 owner 在等待 session 期间也能操作 Bot。
-    # handler 引用 ACTIVE_ACCOUNTS 模块级容器，账号加载/热替换后自动感知。
+    # 先注册指令 handler（含 /start /menu /login 等），让 owner 随时可操作 Bot。
+    # handler 引用 ACTIVE_ACCOUNTS 模块级容器，账号加载/登录后自动感知。
     register_handlers(bot, ACTIVE_ACCOUNTS)
     ACTIVE_ACCOUNTS.extend(ready)
 
-    # 若有账号可用，直接上线；否则等待 owner 发送 session 压缩包
     if not ready:
         try:
             await bot.send_message(
                 OWNER_ID,
-                "⚠️ 服务器上还没有可用的 session。\n"
-                "请在本地运行 make_session.py 生成 session（会自动打包成 tg_sessions.zip），"
-                "然后把 tg_sessions.zip 直接发送给我，我会自动解压并加载，无需重新部署。",
+                "⚠️ 服务器上还没有已登录的账号。\n\n"
+                f"两种方式登录：\n"
+                f"1️⃣ 直接发 /login —— 我会向 ACCOUNT_1_PHONE 发送验证码，你回复数字即可\n"
+                f"2️⃣ 发送 tg_sessions.zip（本地生成）—— 我会自动解压加载\n\n"
+                f"多账号用 /login 2、/login 3 … 指定序号。",
                 buttons=_menu_buttons(),
             )
         except Exception:
             pass
-        log.info("⏳ 等待 owner 发送 session 压缩包…")
+        log.info("⏳ 等待账号登录（/login 或 session zip）…")
         while not ready:
             try:
                 await asyncio.wait_for(ZIP_RECEIVED.wait(), timeout=900)
             except asyncio.TimeoutError:
-                log.info("⏳ 仍在等待 session 压缩包…")
+                log.info("⏳ 仍在等待账号登录…")
                 continue
             ZIP_RECEIVED.clear()
             log.info("📦 已收到 session 压缩包，尝试重新加载…")
