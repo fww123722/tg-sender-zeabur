@@ -163,35 +163,215 @@ state = {
 # 收到 session 压缩包后置位（启动时缺 session 会等待此事件）
 ZIP_RECEIVED = asyncio.Event()
 
-# ---- 服务器端 Bot 交互登录辅助 ----
-# 结构: {(account_no, kind): {"event": asyncio.Event, "value": str|None}}
-# kind: phone / code / password
-AUTH_PENDING = {}
+# ---- 服务器端 Bot 交互登录：全局状态机 ----
+# LOGIN_STATE = None 或 {
+#   "stage": "code" | "password",
+#   "acc_no": int,
+#   "phone": str,
+#   "client": TelegramClient,
+#   "owner_entity": chat_id,
+#   "queue": asyncio.Queue,   # owner 的回复
+# }
+LOGIN_STATE = None
 
 
-def _auth_key(acc_no, kind):
-    return (acc_no, kind)
-
-
-async def ask_owner(bot, prompt, acc_no, kind, timeout=300):
-    """向 owner 提问并等待回复（验证码/密码/手机号）。超时返回 None。"""
-    key = _auth_key(acc_no, kind)
-    ev = asyncio.Event()
-    entry = {"event": ev, "value": None}
-    AUTH_PENDING[key] = entry
+async def login_send(bot, text):
+    """登录流程向 owner 发消息（容错）"""
     try:
-        await bot.send_message(OWNER_ID, prompt)
-        await asyncio.wait_for(ev.wait(), timeout=timeout)
+        await bot.send_message(OWNER_ID, text)
+    except Exception:
+        pass
+
+
+async def login_wait_reply(timeout=300):
+    """等待 owner 的下一条回复（从队列取）。超时返回 None。"""
+    try:
+        return await asyncio.wait_for(LOGIN_STATE["queue"].get(), timeout=timeout)
     except asyncio.TimeoutError:
         return None
-    finally:
-        AUTH_PENDING.pop(key, None)
-    # 注意：从局部 entry 取值（AUTH_PENDING 已在 finally 中被清除）
-    return entry["value"]
 
-# 当前在线账号容器（(account_no, client, phone)）。
-# 热替换时原地 clear+extend，register_handlers 的闭包引用同一对象，自动感知变化。
-ACTIVE_ACCOUNTS = []
+
+async def login_flow(bot, client, phone, acc_no, owner_entity):
+    """完整的交互式登录状态机。
+    前置条件：LOGIN_STATE 已设置、client 已 connect 且未授权。
+    成功返回 True。"""
+    from telethon.errors import (
+        PhoneCodeExpiredError,
+        PhoneCodeInvalidError,
+        PhoneNumberInvalidError,
+        SessionPasswordNeededError,
+    )
+
+    global LOGIN_STATE
+    try:
+        # 验证码环节：过期/错误自动重发，最多 3 次
+        for attempt in (1, 2, 3):
+            await login_send(bot, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
+            try:
+                await client.send_code_request(phone)
+            except PhoneNumberInvalidError:
+                await login_send(bot, "❌ 手机号无效（Telegram 不认可），请检查国家码后重新添加")
+                return False
+            except FloodWaitError as e:
+                await login_send(bot, f"⏳ 发送过于频繁，需等待 {e.seconds} 秒。请稍后再试")
+                return False
+
+            await login_send(bot, "🔐 请回复收到的验证码数字（5 分钟内有效）：")
+            code = await login_wait_reply(300)
+            if code is None:
+                await login_send(bot, "❌ 验证码输入超时，登录中止。请重新发起登录")
+                return False
+            code = code.strip()
+
+            try:
+                await client.sign_in(phone, code)
+                break
+            except PhoneCodeExpiredError:
+                await login_send(bot, "⌛ 验证码已过期，自动重发新验证码…")
+                continue
+            except PhoneCodeInvalidError:
+                await login_send(bot, "❌ 验证码不正确，自动重发新验证码…请回复最新一条的数字")
+                continue
+            except SessionPasswordNeededError:
+                # 二步验证
+                await login_send(bot, "🔑 该账号开启了二步验证，请回复密码：")
+                pwd = await login_wait_reply(300)
+                if pwd is None:
+                    await login_send(bot, "❌ 密码输入超时，登录中止")
+                    return False
+                try:
+                    await client.sign_in(password=pwd.strip())
+                    break
+                except Exception as e:
+                    await login_send(bot, f"❌ 密码错误或登录失败: {e}\n请重新发起登录")
+                    return False
+            except Exception as e:
+                estr = str(e)
+                if "PHONE_CODE_INVALID" in estr or "previously shared" in estr:
+                    await login_send(
+                        bot,
+                        "🚫 Telegram 风控拦截：该验证码被判定为「已共享/泄露」。\n"
+                        "自动重发新验证码…请只在本对话回复新验证码，不要在其他任何地方输入。",
+                    )
+                    continue
+                await login_send(bot, f"❌ 登录失败: {e}")
+                return False
+        else:
+            await login_send(bot, "❌ 验证码连续 3 次失败，登录中止。请稍后重试")
+            return False
+
+        if not await client.is_user_authorized():
+            await login_send(bot, "❌ 登录未完成（Telegram 可能拦截了本次登录，请查看该账号的官方通知后重试）")
+            return False
+
+        me = await client.get_me()
+        log.info(f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
+        await login_send(bot, f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
+        return True
+    finally:
+        LOGIN_STATE = None
+
+
+async def _login_accounts(bot, accounts, targets, owner_entity):
+    """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
+    登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
+    global LOGIN_STATE
+    for acc_no, client, phone in accounts:
+        if acc_no not in targets:
+            continue
+        if LOGIN_STATE is not None:
+            await login_send(bot, "⏳ 已有登录流程进行中，请先完成或等待超时")
+            return
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                await login_send(bot, f"⏭️ [账号{acc_no}] 已登录: {me.first_name} (@{me.username})，无需重复登录")
+                continue
+
+            LOGIN_STATE = {
+                "stage": "code",
+                "acc_no": acc_no,
+                "phone": phone,
+                "client": client,
+                "owner_entity": owner_entity,
+                "queue": asyncio.Queue(),
+            }
+            ok = await login_flow(bot, client, phone, acc_no, owner_entity)
+            if ok:
+                if not any(a[0] == acc_no for a in ACTIVE_ACCOUNTS):
+                    ACTIVE_ACCOUNTS.append((acc_no, client, phone))
+                    asyncio.create_task(client.run_until_disconnected())
+                await login_send(bot, f"🟢 [账号{acc_no}] 已上线，当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线")
+            else:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error(f"❌ [账号{acc_no}] 登录异常: {e}")
+            LOGIN_STATE = None
+            try:
+                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录异常: {e}")
+                await client.disconnect()
+            except Exception:
+                pass
+
+
+async def _add_account_interactive(bot, phone, owner_entity):
+    """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
+    不依赖环境变量，成功后自动分配下一个可用序号。"""
+    global LOGIN_STATE
+    phone = (phone or "").strip()
+    if not re.match(r"^\+?\d{6,15}$", phone):
+        await bot.send_message(owner_entity, "❌ 手机号格式无效（应含国家码，如 +8613800138000）")
+        return
+    if LOGIN_STATE is not None:
+        await bot.send_message(owner_entity, "⏳ 已有登录流程进行中，请先完成或等待超时")
+        return
+
+    # 分配序号：现有最大序号 +1
+    acc_no = max(list(ACCS.keys()) + [a[0] for a in ACTIVE_ACCOUNTS] + [0]) + 1
+    sess = os.path.join(DATA_DIR, f"tg_session_{acc_no}.session")
+
+    client = TelegramClient(sess, API_ID, API_HASH)
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            await bot.send_message(owner_entity, f"⏭️ 该手机号已有有效 session: {me.first_name} (@{me.username})")
+            return
+
+        LOGIN_STATE = {
+            "stage": "code",
+            "acc_no": acc_no,
+            "phone": phone,
+            "client": client,
+            "owner_entity": owner_entity,
+            "queue": asyncio.Queue(),
+        }
+        ok = await login_flow(bot, client, phone, acc_no, owner_entity)
+        if ok:
+            ACCS[acc_no] = phone
+            ACTIVE_ACCOUNTS.append((acc_no, client, phone))
+            asyncio.create_task(client.run_until_disconnected())
+            await bot.send_message(
+                owner_entity,
+                f"🟢 [账号{acc_no}] 已上线，可直接使用群发功能。当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线。",
+            )
+        else:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+    except Exception as e:
+        log.error(f"❌ [新账号] 添加异常: {e}")
+        LOGIN_STATE = None
+        try:
+            await bot.send_message(owner_entity, f"❌ 添加异常: {e}")
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 # =====================================================================
@@ -948,201 +1128,6 @@ async def _reply(event, *args, **kwargs):
     return await event.client.send_message(event.chat_id, *args, **kwargs)
 
 
-async def _login_accounts(bot, accounts, targets, owner_entity):
-    """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
-    登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
-    from telethon.errors import (
-        PhoneCodeExpiredError,
-        PhoneCodeInvalidError,
-        SessionPasswordNeededError,
-    )
-
-    for acc_no, client, phone in accounts:
-        if acc_no not in targets:
-            continue
-        try:
-            await client.connect()
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                await bot.send_message(owner_entity, f"⏭️ [账号{acc_no}] 已登录: {me.first_name} (@{me.username})，无需重复登录")
-                continue
-
-            # 验证码环节：过期/错误时自动重发，最多 3 次
-            signed_in = False
-            for attempt in (1, 2, 3):
-                await bot.send_message(owner_entity, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
-                await client.send_code_request(phone)
-
-                code = await ask_owner(bot, f"🔐 [账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字，5 分钟内有效）：", acc_no, "code")
-                if not code:
-                    await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 验证码输入超时，登录中止。可重新发 /login {acc_no}")
-                    await client.disconnect()
-                    break
-
-                try:
-                    await client.sign_in(phone, code.strip())
-                    signed_in = True
-                    break
-                except PhoneCodeExpiredError:
-                    await bot.send_message(owner_entity, "⌛ 验证码已过期，正在重新发送…请回复最新收到的数字")
-                    continue
-                except PhoneCodeInvalidError:
-                    await bot.send_message(owner_entity, "❌ 验证码错误，正在重新发送…请确认回复最新一条验证码的数字")
-                    continue
-                except SessionPasswordNeededError:
-                    pwd = await ask_owner(bot, f"🔑 [账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
-                    if not pwd:
-                        await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 密码输入超时，登录中止。可重新发 /login {acc_no}")
-                        await client.disconnect()
-                        break
-                    await client.sign_in(password=pwd.strip())
-                    signed_in = True
-                    break
-                except Exception as e:
-                    estr = str(e)
-                    if "PHONE_CODE_INVALID" in estr or "code was previously shared" in estr:
-                        await bot.send_message(
-                            owner_entity,
-                            "🚫 Telegram 风控拦截：该验证码被判定为「已共享/泄露」，本次登录被拒绝。\n"
-                            "正在重新发送新验证码…请只在本对话回复新验证码，不要在其他任何地方输入。",
-                        )
-                        continue
-                    raise
-
-            if not signed_in:
-                continue
-            if not await client.is_user_authorized():
-                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录失败（验证码/密码错误）。可重新发 /login {acc_no}")
-                await client.disconnect()
-                continue
-
-            me = await client.get_me()
-            log.info(f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
-            await bot.send_message(owner_entity, f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
-
-            # 4) 加入在线列表并启动（若尚未在列）
-            exists = any(a[0] == acc_no for a in ACTIVE_ACCOUNTS)
-            if not exists:
-                ACTIVE_ACCOUNTS.append((acc_no, client, phone))
-                asyncio.create_task(client.run_until_disconnected())
-        except Exception as e:
-            log.error(f"❌ [账号{acc_no}] 登录异常: {e}")
-            try:
-                await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录异常: {e}")
-                await client.disconnect()
-            except Exception:
-                pass
-
-
-async def _add_account_interactive(bot, phone, owner_entity):
-    """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
-    不依赖环境变量，成功后自动分配下一个可用序号。"""
-    from telethon.errors import (
-        PhoneCodeExpiredError,
-        PhoneCodeInvalidError,
-        PhoneNumberInvalidError,
-        SessionPasswordNeededError,
-    )
-
-    phone = (phone or "").strip()
-    if not re.match(r"^\+?\d{6,15}$", phone):
-        await bot.send_message(owner_entity, "❌ 手机号格式无效（应含国家码，如 +8613800138000）")
-        return
-
-    # 分配序号：现有最大序号 +1
-    acc_no = max(list(ACCS.keys()) + [a[0] for a in ACTIVE_ACCOUNTS] + [0]) + 1
-    sess = os.path.join(DATA_DIR, f"tg_session_{acc_no}.session")
-
-    client = TelegramClient(sess, API_ID, API_HASH)
-    try:
-        await client.connect()
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            await bot.send_message(owner_entity, f"⏭️ 该手机号已有有效 session: {me.first_name} (@{me.username})")
-            return
-
-        # 验证码环节：过期/错误时自动重发，最多 3 次
-        signed_in = False
-        for attempt in (1, 2, 3):
-            await bot.send_message(owner_entity, f"📱 [新账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
-            await client.send_code_request(phone)
-
-            code = await ask_owner(bot, f"🔐 [新账号{acc_no}] 请输入 {phone} 收到的验证码（直接回复数字，5 分钟内有效）：", acc_no, "code")
-            if not code:
-                await bot.send_message(owner_entity, "❌ 验证码输入超时，添加中止。可重新点「添加账号」")
-                await client.disconnect()
-                return
-
-            try:
-                await client.sign_in(phone, code.strip())
-                signed_in = True
-                break
-            except PhoneCodeExpiredError:
-                await bot.send_message(owner_entity, "⌛ 验证码已过期，正在重新发送新验证码…请回复最新收到的数字")
-                continue
-            except PhoneCodeInvalidError:
-                await bot.send_message(owner_entity, "❌ 验证码错误，正在重新发送…请确认回复最新一条验证码的数字")
-                continue
-            except SessionPasswordNeededError:
-                pwd = await ask_owner(bot, f"🔑 [新账号{acc_no}] 该账号开启了二步验证，请回复密码：", acc_no, "password")
-                if not pwd:
-                    await bot.send_message(owner_entity, "❌ 密码输入超时，添加中止")
-                    await client.disconnect()
-                    return
-                await client.sign_in(password=pwd.strip())
-                signed_in = True
-                break
-            except Exception as e:
-                estr = str(e)
-                if "PHONE_CODE_INVALID" in estr or "code was previously shared" in estr or "PHONE_NUMBER_UNBLOCK" in estr:
-                    # Telegram 风控：验证码被判定为"已泄露/已共享"，本次码作废
-                    await bot.send_message(
-                        owner_entity,
-                        "🚫 Telegram 风控拦截：该验证码被判定为「已共享/泄露」，本次登录被拒绝。\n"
-                        "常见原因：验证码曾在其他设备/应用输入过，或 Telegram 判定登录环境可疑。\n\n"
-                        "正在重新发送新验证码…请只在本对话回复新验证码，不要在其他任何地方输入。",
-                    )
-                    continue
-                raise
-
-        if not signed_in or not await client.is_user_authorized():
-            await bot.send_message(
-                owner_entity,
-                "❌ 登录未完成。可能原因：\n"
-                "1. Telegram 风控拦截（检查该账号的 Telegram 官方通知）\n"
-                "2. 验证码过期/错误\n\n"
-                "建议：等 10-30 分钟后再试；登录时不要把验证码输入到其他任何 App/网站；"
-                "若官方通知里有「允许登录」选项，先去确认。",
-            )
-            await client.disconnect()
-            return
-
-        me = await client.get_me()
-        # 登记到 ACCS，让 /login、热替换等流程也能感知
-        ACCS[acc_no] = phone
-        ACTIVE_ACCOUNTS.append((acc_no, client, phone))
-        asyncio.create_task(client.run_until_disconnected())
-        log.info(f"✅ [新账号{acc_no}] 添加成功: {me.first_name} (@{me.username})")
-        await bot.send_message(
-            owner_entity,
-            f"✅ [账号{acc_no}] 添加成功: {me.first_name} (@{me.username})\n"
-            f"已上线，可直接使用群发功能。当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线。",
-        )
-    except PhoneNumberInvalidError:
-        await bot.send_message(owner_entity, "❌ 手机号无效（Telegram 不认可），请检查国家码")
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-    except Exception as e:
-        log.error(f"❌ [新账号] 添加异常: {e}")
-        try:
-            await bot.send_message(owner_entity, f"❌ 添加异常: {e}")
-            await client.disconnect()
-        except Exception:
-            pass
-
-
 def register_handlers(bot, accounts):
     # accounts: list of (account_no, client, phone)
 
@@ -1347,20 +1332,20 @@ def register_handlers(bot, accounts):
         await _reply(event, f"🔄 开始登录账号 {targets}，验证码将发到这里，直接回复数字即可…")
         asyncio.ensure_future(_login_accounts(bot, accounts, targets, event.chat_id))
 
-    # ---- owner 回复分发：优先喂给等待中的登录提问（验证码/密码） ----
+    # ---- owner 回复分发：登录进行中时，所有回复进登录队列 ----
     @bot.on(events.NewMessage())
     async def on_auth_reply(event):
+        global LOGIN_STATE
         if event.sender_id != OWNER_ID:
             return
         text = (event.text or "").strip()
-        if not text or not AUTH_PENDING:
+        if not text or LOGIN_STATE is None:
             return
-        # 只把回复喂给最早发起的提问（同一时刻一般只有一个登录流程）
-        for key, info in sorted(AUTH_PENDING.items()):
-            if info["value"] is None:
-                info["value"] = text
-                info["event"].set()
-                return
+        # 登录流程等待中：把回复投进队列（不阻塞 handler）
+        try:
+            LOGIN_STATE["queue"].put_nowait(text)
+        except Exception:
+            pass
 
     # ---- 底部按钮处理（二级菜单：主按钮切键盘，子按钮执行动作） ----
     @bot.on(events.NewMessage())
