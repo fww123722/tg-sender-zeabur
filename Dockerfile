@@ -8,6 +8,12 @@ ENV TZ=Asia/Shanghai \
 
 WORKDIR /app
 
+# 安装系统依赖（psycopg2-binary 需要 libpq，slim 镜像缺）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 # 先装依赖（利用 Docker 层缓存：代码改动不触发重装）
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
