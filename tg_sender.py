@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Telegram 群发推广系统 — Zeabur + PostgreSQL + 多账号版
@@ -159,6 +159,9 @@ state = {
     "max_delay": MAX_DELAY,
     "daily_limit": DAILY_LIMIT,
 }
+
+# 活跃账号列表（运行时动态添加/热替换）
+ACTIVE_ACCOUNTS = []  # 元素: (acc_no, client, phone)
 
 # 收到 session 压缩包后置位（启动时缺 session 会等待此事件）
 ZIP_RECEIVED = asyncio.Event()
