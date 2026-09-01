@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import psycopg2
 import psycopg2.pool
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.errors import (
     FloodWaitError,
     InviteHashExpiredError,
@@ -305,6 +306,11 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 if not any(a[0] == acc_no for a in ACTIVE_ACCOUNTS):
                     ACTIVE_ACCOUNTS.append((acc_no, client, phone))
                     asyncio.create_task(client.run_until_disconnected())
+                # 登录成功，保存 StringSession 到 PostgreSQL
+                try:
+                    DB.save_session("tg_session_%d" % acc_no, client.session.save())
+                except Exception as exc:
+                    log.warning("? 保存 session 到 PostgreSQL 失败: %s", exc)
                 await login_send(bot, f"🟢 [账号{acc_no}] 已上线，当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线")
             else:
                 try:
@@ -337,12 +343,17 @@ async def _add_account_interactive(bot, phone, owner_entity):
     acc_no = max(list(ACCS.keys()) + [a[0] for a in ACTIVE_ACCOUNTS] + [0]) + 1
     sess = os.path.join(DATA_DIR, f"tg_session_{acc_no}.session")
 
-    client = TelegramClient(sess, API_ID, API_HASH)
+    # 优先从 PostgreSQL 加载已有 session
+    session_str = DB.load_session("tg_session_%d" % acc_no)
+    if session_str:
+        client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    else:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
         if await client.is_user_authorized():
             me = await client.get_me()
-            await bot.send_message(owner_entity, f"⏭️ 该手机号已有有效 session: {me.first_name} (@{me.username})")
+            await bot.send_message(owner_entity, f"?? 该手机号已有有效 session: {me.first_name} (@{me.username})")
             return
 
         LOGIN_STATE = {
@@ -358,6 +369,11 @@ async def _add_account_interactive(bot, phone, owner_entity):
             ACCS[acc_no] = phone
             ACTIVE_ACCOUNTS.append((acc_no, client, phone))
             asyncio.create_task(client.run_until_disconnected())
+            # 保存 StringSession 到 PostgreSQL
+            try:
+                DB.save_session("tg_session_%d" % acc_no, client.session.save())
+            except Exception as exc:
+                log.warning("? 保存 session 到 PostgreSQL 失败: %s", exc)
             await bot.send_message(
                 owner_entity,
                 f"🟢 [账号{acc_no}] 已上线，可直接使用群发功能。当前共 {len(ACTIVE_ACCOUNTS)} 个账号在线。",
@@ -455,6 +471,14 @@ class DB:
                 created_at TIMESTAMPTZ DEFAULT now()
             )
         """)
+        # session 持久化表（存 StringSession 字符串，容器重启不丢失）
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tg_sessions (
+                name TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
 
     @classmethod
     def getconn(cls):
@@ -468,6 +492,45 @@ class DB:
     @classmethod
     def putconn(cls, conn):
         cls._pool.putconn(conn)
+
+    # ---- session 持久化（PostgreSQL） ----
+
+    @classmethod
+    def load_session(cls, name: str):
+        """按名字从 PostgreSQL 读回 StringSession 字符串，没有则返回 None。"""
+        try:
+            conn = cls.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM tg_sessions WHERE name = %s", (name,))
+                    row = cur.fetchone()
+                return row[0] if row else None
+            finally:
+                cls.putconn(conn)
+        except Exception as e:
+            log.warning(f"? 读取 session[{name}] 失败: {e}")
+            return None
+
+    @classmethod
+    def save_session(cls, name: str, data: str):
+        """把 StringSession 字符串写入 PostgreSQL（upsert）。"""
+        if not data:
+            return
+        try:
+            conn = cls.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO tg_sessions (name, data, updated_at)
+                        VALUES (%s, %s, now())
+                        ON CONFLICT (name) DO UPDATE
+                        SET data = EXCLUDED.data, updated_at = now()
+                    """, (name, data))
+                conn.commit()
+            finally:
+                cls.putconn(conn)
+        except Exception as e:
+            log.warning(f"? 保存 session[{name}] 失败: {e}")
 
     @classmethod
     def reset(cls):
@@ -1562,6 +1625,13 @@ def _extract_session_zip(download_path):
                     continue
                 with zf.open(n) as src, open(os.path.join(DATA_DIR, base), "wb") as dst:
                     dst.write(src.read())
+                    # 同步导入到 PostgreSQL，容器重启不丢失
+                    m = re.match(r"tg_session_(\d+)\.session", base)
+                    if m:
+                        try:
+                            _import_session_file_to_pg(int(m.group(1)), os.path.join(DATA_DIR, base))
+                        except Exception as exc:
+                            log.warning("? 导入 session 到 PostgreSQL 失败: %s", exc)
         try:
             os.remove(download_path)
         except Exception:
@@ -1608,6 +1678,26 @@ async def _register_zip_receiver(bot):
             await _reply(event, f"❌ 处理压缩包失败: {e}")
 
 
+def _import_session_file_to_pg(acc_no: int, filepath: str):
+    """读取本地 .session 文件（SQLite），转换成 StringSession 字符串，写入 PostgreSQL。"""
+    if not os.path.isfile(filepath):
+        return
+    try:
+        import telethon.sessions as tsess
+        sql_sess = tsess.SQLiteSession(filepath)
+        string_sess = tsess.StringSession()
+        string_sess._dc_id = sql_sess.dc_id
+        string_sess._server_address = sql_sess.server_address
+        string_sess._port = sql_sess.port
+        if sql_sess.auth_key:
+            string_sess._auth_key = sql_sess.auth_key
+        data = string_sess.save()
+        if data:
+            DB.save_session("tg_session_%d" % acc_no, data)
+    except Exception as e:
+        log.warning("? 导入 session[%s] 到 PostgreSQL 失败: %s", acc_no, e)
+
+
 def _find_session(acc_no: int) -> str:
     """依次在 DATA_DIR 和 BASE_DIR 下查找 session 文件，返回第一个存在的路径，或默认 DATA_DIR 路径"""
     candidates = [
@@ -1627,13 +1717,19 @@ async def main():
     start_health_server()
     DB.init()
 
-    bot_session_path = os.path.join(DATA_DIR, "bot_session.session")
-    bot = TelegramClient(bot_session_path, API_ID, API_HASH)
+    # bot_session：优先从 PostgreSQL 加载 StringSession，容器重启不丢失
+    bot_session_str = DB.load_session("bot_session")
+    bot = TelegramClient(StringSession(bot_session_str) if bot_session_str else StringSession(), API_ID, API_HASH)
     for attempt in (1, 2):
         try:
             await bot.start(bot_token=BOT_TOKEN)
             me_bot = await bot.get_me()
             log.info(f"🤖 控制 Bot 已连接: @{me_bot.username}")
+            # 保存已登录的 StringSession 到 PostgreSQL
+            try:
+                DB.save_session("bot_session", bot.session.save())
+            except Exception as exc:
+                log.warning("? 保存 bot_session 到 PostgreSQL 失败: %s", exc)
             break
         except Exception as e:
             estr = str(e)
@@ -1652,7 +1748,8 @@ async def main():
                             os.remove(p)
                     except Exception:
                         pass
-                bot = TelegramClient(bot_session_path, API_ID, API_HASH)
+                DB.save_session("bot_session", "")  # 清空无效 session
+                bot = TelegramClient(StringSession(), API_ID, API_HASH)
                 continue
             if "API_ID_INVALID" in estr or "api_id" in estr.lower():
                 log.error("❌ Bot 连接失败: API_ID/API_HASH 无效。请核对 my.telegram.org 的值是否正确。")
@@ -1672,13 +1769,13 @@ async def main():
     accounts = []  # (account_no, client, phone)
     for acc_no in sorted(ACCS.keys()):
         phone = ACCS[acc_no]
-        sess = _find_session(acc_no)
-        client = TelegramClient(sess, API_ID, API_HASH)
-        accounts.append((acc_no, client, phone))
-    N = len(accounts)
-    log.info(f"📡 检测到 {N} 个账号")
-
-    async def load_accounts():
+        # 优先从 PostgreSQL 加载 StringSession
+        session_str = DB.load_session("tg_session_%d" % acc_no)
+        if session_str:
+            client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        else:
+            sess = _find_session(acc_no)
+            client = TelegramClient(sess, API_ID, API_HASH)
         """尝试加载所有账号的 session，返回 (ready, failed)"""
         ready = []
         failed = []
@@ -1692,6 +1789,11 @@ async def main():
                 me = await client.get_me()
                 ready.append((acc_no, client, phone))
                 log.info(f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})")
+                # 保存已加载的 StringSession 到 PostgreSQL
+                try:
+                    DB.save_session("tg_session_%d" % acc_no, client.session.save())
+                except Exception as exc:
+                    log.warning("? 保存 session 到 PostgreSQL 失败: %s", exc)
                 try:
                     await bot.send_message(OWNER_ID, f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})")
                 except Exception:
@@ -1784,12 +1886,12 @@ async def main():
             new_accounts = []
             for acc_no in sorted(ACCS.keys()):
                 phone = ACCS[acc_no]
-                sess = _find_session(acc_no)
-                client = TelegramClient(sess, API_ID, API_HASH)
-                new_accounts.append((acc_no, client, phone))
-            # 重新加载
-            new_ready = []
-            for acc_no, client, phone in new_accounts:
+                session_str = DB.load_session("tg_session_%d" % acc_no)
+                if session_str:
+                    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                else:
+                    sess = _find_session(acc_no)
+                    client = TelegramClient(sess, API_ID, API_HASH)
                 try:
                     await client.connect()
                     if not await client.is_user_authorized():
