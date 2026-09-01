@@ -1095,6 +1095,8 @@ KBD_ACTIONS = {
     "停止任务": "stop",
 }
 
+BTN_BACK = "返回主菜单"
+
 
 def _kb(rows):
     """由按钮文字构造回复键盘（Telethon 1.44 需显式 KeyboardButtonRow）"""
@@ -1123,6 +1125,8 @@ def _submenu_buttons(main_btn):
         rows = [("群组状态",)]
     else:
         rows = [(BTN_MAIN[0], BTN_MAIN[1]), (BTN_MAIN[2], BTN_MAIN[3])]
+    # 子菜单底部统一加「返回主菜单」按钮
+    rows.append((BTN_BACK,))
     return _kb(rows)
 
 
@@ -1359,7 +1363,14 @@ def register_handlers(bot, accounts):
         if not text:
             return
 
-        # 1) 主按钮 → 切换到对应子菜单键盘
+        # 1) 返回主菜单 → 切回主菜单键盘
+        if text == BTN_BACK:
+            if event.sender_id in pending_input:
+                del pending_input[event.sender_id]
+            await _reply(event, "主菜单", buttons=_menu_buttons())
+            return
+
+        # 2) 主按钮 → 切换到对应子菜单键盘
         if text in BTN_MAIN:
             if event.sender_id in pending_input:
                 del pending_input[event.sender_id]
