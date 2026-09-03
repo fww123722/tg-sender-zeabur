@@ -359,8 +359,12 @@ def register_handlers(bot, accounts):
             await _consume_input(event, action, text)
             return
 
-        # 4. 未登录状态下多余输入提示
-        if not accounts and not LOGIN_STATE:
+        # 4. 登录流程进行中 → 跳过，让 on_auth_reply 独享
+        if LOGIN_STATE:
+            return
+
+        # 5. 未登录状态下多余输入提示
+        if not accounts:
             await _reply(event, "尚未登录账号，请点「账号管理」→「添加账号」。", buttons=main_menu_kb())
             return
 
