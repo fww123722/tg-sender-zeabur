@@ -8,7 +8,9 @@ make_session_gui.py
 sessions/
 output/
 tg_sessions.zip
-config.py
+
+# 注意：config.py 不再排除，因为模块拆分后需要它参与构建。
+# 密钥敏感信息通过 Zeabur 环境变量注入，不上传内容。
 
 # Session 文件（敏感：包含登录态，切勿公开提交）
 *.session

@@ -18,8 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 只复制运行所需的源码（.dockerignore 已排除 session/密钥/venv 等）
-COPY tg_sender.py .
+# 复制全部模块源码
+COPY *.py .
 
 # 数据目录（Zeabur Volume 挂载点：session 文件与日志）
 RUN mkdir -p /data \
@@ -34,4 +34,4 @@ ENV PORT=8080
 EXPOSE 8080
 
 # 长驻进程
-CMD ["python", "tg_sender.py"]
+CMD ["python", "main.py"]
