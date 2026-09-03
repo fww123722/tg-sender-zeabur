@@ -67,6 +67,17 @@ async def safe_send_media(client, entity, text, file=None, image=None):
         return False, str(e)
 
 
+def _is_bad_peer(err) -> bool:
+    """判定是否为 access_hash 失效/实体不可达类错误（可尝试重新解析重试）"""
+    e = (err or "").lower()
+    return (
+        "invalid peer" in e
+        or "peer_id_invalid" in e
+        or "could not find" in e
+        or "peer user is invalid" in e
+    )
+
+
 async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None):
     """多个账号轮流派发目标，各自控制频率，并发执行。
     群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。"""
@@ -160,6 +171,13 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                     progress["done"] += 1
                     continue
             ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+            if not ok and _is_bad_peer(err):
+                # access_hash 无效/过期兜底：重新解析实体再试一次
+                try:
+                    entity = await client.get_input_entity(int(uid))
+                    ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+                except Exception as e2:
+                    err = f"{err} | 重新解析实体也失败: {e2}"
             progress["done"] += 1
             if ok:
                 progress["sent"] += 1
