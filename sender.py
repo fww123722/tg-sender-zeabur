@@ -74,7 +74,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     uid_list = list(targets.keys())
 
     # 每个账号分配到的子集：轮流均匀分配
-    per_account = {acc_no: [] for acc_no, _ in accounts}
+    per_account = {acc_no: [] for acc_no, *_ in accounts}
     for i, uid in enumerate(uid_list):
         acc_no = accounts[i % len(accounts)][0]
         per_account[acc_no].append(uid)
@@ -86,7 +86,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         "sent": 0,          # 成功发送
         "fail": 0,          # 发送失败
         "skipped": 0,       # 跳过（已发过/解析失败）
-        "per_acc": {acc_no: {"sent": 0, "fail": 0} for acc_no, _ in accounts},
+        "per_acc": {acc_no: {"sent": 0, "fail": 0} for acc_no, *_ in accounts},
     }
 
     async def progress_reporter():
