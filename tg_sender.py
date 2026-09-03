@@ -1741,13 +1741,6 @@ async def main():
                     await bot.disconnect()
                 except Exception:
                     pass
-                for suffix in ("", "-journal"):
-                    p = bot_session_path + suffix
-                    try:
-                        if os.path.exists(p):
-                            os.remove(p)
-                    except Exception:
-                        pass
                 DB.save_session("bot_session", "")  # 清空无效 session
                 bot = TelegramClient(StringSession(), API_ID, API_HASH)
                 continue
@@ -1898,7 +1891,7 @@ async def main():
                         await client.disconnect()
                         continue
                     me = await client.get_me()
-                    new_ready.append((acc_no, client, phone))
+                    new_accounts.append((acc_no, client, phone))
                     log.info(f"✅ [账号{acc_no}] 热替换成功: {me.first_name} (@{me.username})")
                 except Exception as e:
                     log.error(f"❌ [账号{acc_no}] 热替换失败: {e}")
@@ -1906,11 +1899,11 @@ async def main():
                         await client.disconnect()
                     except Exception:
                         pass
-            if new_ready:
-                ACTIVE_ACCOUNTS.extend(new_ready)
-                msg = f"♻️ 热替换完成，当前 {len(new_ready)} 个账号在线"
+            if new_accounts:
+                ACTIVE_ACCOUNTS.extend(new_accounts)
+                msg = f"♻️ 热替换完成，当前 {len(new_accounts)} 个账号在线"
                 # 新账号也跑起来（与旧账号共享同一个 bot）
-                for acc_no, client, phone in new_ready:
+                for acc_no, client, phone in new_accounts:
                     asyncio.create_task(client.run_until_disconnected())
                 log.info(msg)
                 try:
