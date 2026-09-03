@@ -575,7 +575,7 @@ def register_handlers(bot, accounts):
                 f"🚀 开始群发：{len(accounts)}个账号 | 目标 {len(targets)} 人 | "
                 f"间隔 {state['min_delay']}-{state['max_delay']}s\n"
                 "每 15 秒自动汇报进度。可用「暂停/继续/停止」控制。")
-            result = await send_to_list_multi(accounts, targets, text, event.chat_id)
+            result = await send_to_list_multi(accounts, targets, text, event.chat_id, bot=bot)
             await _reply(event, result, buttons=main_menu_kb())
             # 发完清除一次性运营状态
             clear_campaign()

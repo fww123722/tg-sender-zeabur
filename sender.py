@@ -78,10 +78,21 @@ def _is_bad_peer(err) -> bool:
     )
 
 
-async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None):
+async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None, bot=None):
     """多个账号轮流派发目标，各自控制频率，并发执行。
-    群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。"""
+    群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。
+    汇报统一走控制 Bot（bot 参数），不占用群发账号；bot 缺失时回退账号1。"""
     # targets: {uid: {"username": ..., "access_hash": ...}}
+
+    async def _report(msg_text):
+        """统一汇报通道：优先控制 Bot，避免群发账号给 owner 发汇报消息"""
+        sender = bot or (accounts[0][1] if accounts else None)
+        if sender is None:
+            return
+        try:
+            await sender.send_message(owner_entity, msg_text)
+        except Exception:
+            log.warning("汇报消息发送失败")
     uid_list = list(targets.keys())
 
     # 每个账号分配到的子集：轮流均匀分配
@@ -117,10 +128,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         for acc_no, _client, _ph in accounts:
             pa = progress["per_acc"].get(acc_no, {"sent": 0, "fail": 0})
             lines.append(f"   [账号{acc_no}] 成功 {pa['sent']} | 失败 {pa['fail']}")
-        try:
-            await accounts[0][1].send_message(owner_entity, "\n".join(lines))
-        except Exception:
-            log.warning("进度消息发送失败")
+        await _report("\n".join(lines))
 
     async def worker(client, acc_no, my_uids):
         """单个账号的处理循环"""
@@ -130,23 +138,14 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             if state["stop"]:
                 return
             if state["paused"]:
-                try:
-                    await client.send_message(owner_entity, f"⏸ 账号{acc_no} 已暂停")
-                except Exception:
-                    pass
+                await _report(f"⏸ 账号{acc_no} 已暂停")
                 # 暂停时循环等待，不退出
                 while state["paused"] and not state["stop"]:
                     await asyncio.sleep(5)
                 if state["stop"]:
                     return
             if stats["sent_today"] >= state["daily_limit"]:
-                try:
-                    await client.send_message(
-                        owner_entity,
-                        f"🚫 账号{acc_no} 今日已达上限 {state['daily_limit']} 条，该账号停止",
-                    )
-                except Exception:
-                    pass
+                await _report(f"🚫 账号{acc_no} 今日已达上限 {state['daily_limit']} 条，该账号停止")
                 return
             if uid in sent_set:
                 progress["skipped"] += 1
@@ -220,15 +219,11 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         total_s += s
         total_f += f
         parts.append(f"账号{acc_no}:成功{s}失败{f}")
-    try:
-        await accounts[0][1].send_message(
-            owner_entity,
-            f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
-            + "\n".join(parts)
-            + f"\n合计：成功 {total_s}，失败 {total_f}，跳过 {progress['skipped']}",
-        )
-    except Exception:
-        pass
+    await _report(
+        f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
+        + "\n".join(parts)
+        + f"\n合计：成功 {total_s}，失败 {total_f}，跳过 {progress['skipped']}"
+    )
     return f"✅ 多账号群发完成（{len(accounts)}个账号）\n" + "\n".join(parts) + f"\n合计：成功 {total_s}，失败 {total_f}，跳过 {progress['skipped']}"
 
 
