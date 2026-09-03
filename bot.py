@@ -65,6 +65,7 @@ def _load_settings():
     s.setdefault("min_delay", state["min_delay"])
     s.setdefault("max_delay", state["max_delay"])
     s.setdefault("daily_limit", state["daily_limit"])
+    s.setdefault("parse_mode", None)
     return s
 
 
@@ -73,6 +74,7 @@ def _apply_settings_to_state():
     state["min_delay"] = s["min_delay"]
     state["max_delay"] = s["max_delay"]
     state["daily_limit"] = s["daily_limit"]
+    state["parse_mode"] = s.get("parse_mode")
 
 
 async def _push_main_menu(event):
@@ -431,6 +433,27 @@ def register_handlers(bot, accounts):
         elif action == "set_parallel_prompt":
             await _reply(event, "⏩ 并行账号数由系统按可用账号自动分配，无需手动设置。\n"
                                 "当前可用账号越多，自动分配越快。", buttons=settings_menu_kb())
+        elif action == "set_parsemode":
+            order = [None, "html", "md"]
+            label = {None: "纯文本", "html": "HTML", "md": "Markdown"}
+            cur = state.get("parse_mode") or None
+            try:
+                nxt = order[(order.index(cur) + 1) % len(order)]
+            except ValueError:
+                nxt = None
+            s = _load_settings()
+            s["parse_mode"] = nxt
+            ops_set("settings", s)
+            state["parse_mode"] = nxt
+            tip = {
+                None: "原样发送，不做任何格式解析",
+                "html": '支持 <b>加粗</b> <i>斜体</i> <a href="https://t.me">链接</a> <code>代码</code>',
+                "md": "支持 **加粗** *斜体* [链接](https://t.me) `代码`",
+            }
+            await _reply(event,
+                f"✍️ 文本模式已切换为：{label[nxt]}\n\n用法：{tip[nxt]}\n\n"
+                "（再点一次「文本模式」继续切换：纯文本 → HTML → Markdown）",
+                buttons=settings_menu_kb())
 
     # ---------- 数据看板 ----------
     async def _dashboard(event):

@@ -39,6 +39,7 @@ BTN = {
     "set_speed": "发送间隔",
     "set_quota": "每日上限",
     "set_parallel": "并行账号数",
+    "set_parsemode": "文本模式",
     # 通用
     "back": "🔙 返回主菜单",
     "back_campaign": "🔙 返回群发运营",
@@ -75,6 +76,7 @@ BTN_ACTION = {
     BTN["set_speed"]: "set_speed_prompt",
     BTN["set_quota"]: "set_quota_prompt",
     BTN["set_parallel"]: "set_parallel_prompt",
+    BTN["set_parsemode"]: "set_parsemode",
     BTN["pause"]: "pause",
     BTN["resume"]: "resume",
     BTN["stop"]: "stop",
@@ -161,10 +163,10 @@ def accounts_menu_kb():
 
 
 def settings_menu_kb():
-    """系统设置菜单：间隔 / 上限 / 并行数"""
+    """系统设置菜单：间隔 / 上限 / 并行数 / 文本模式"""
     return _kb([
         (BTN["set_speed"], BTN["set_quota"]),
-        (BTN["set_parallel"],),
+        (BTN["set_parallel"], BTN["set_parsemode"]),
         (BTN["back"],),
     ])
 
@@ -218,4 +220,4 @@ def accounts_menu_text():
 
 
 def settings_menu_text():
-    return "⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数。"
+    return "⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数、文本模式。"

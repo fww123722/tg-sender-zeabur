@@ -17,9 +17,10 @@ from db import (
 
 
 async def safe_send(client, entity, text):
-    """带 FLOOD_WAIT 自动等待的发送封装。"""
+    """带 FLOOD_WAIT 自动等待的发送封装（按 state.parse_mode 解析文本格式）。"""
+    pm = state.get("parse_mode") or None
     try:
-        await client.send_message(entity, text)
+        await client.send_message(entity, text, parse_mode=pm)
         return True, None
     except FloodWaitError as e:
         wait = e.seconds
@@ -27,7 +28,7 @@ async def safe_send(client, entity, text):
         if wait <= MAX_FLOOD_WAIT:
             await asyncio.sleep(wait)
             try:
-                await client.send_message(entity, text)
+                await client.send_message(entity, text, parse_mode=pm)
                 return True, None
             except Exception as e2:
                 return False, str(e2)
@@ -37,15 +38,16 @@ async def safe_send(client, entity, text):
 
 
 async def safe_send_media(client, entity, text, file=None, image=None):
-    """带图文/文件/纯文本的发送。优先发文件，其次图片，最后纯文本。
+    """带图文/文件/纯文本的发送（按 state.parse_mode 解析格式）。优先发文件，其次图片，最后纯文本。
     返回 (ok, err)。"""
+    pm = state.get("parse_mode") or None
     try:
         if file:
-            await client.send_file(entity, file, caption=text)
+            await client.send_file(entity, file, caption=text, parse_mode=pm)
         elif image:
-            await client.send_file(entity, image, caption=text)
+            await client.send_file(entity, image, caption=text, parse_mode=pm)
         else:
-            await client.send_message(entity, text)
+            await client.send_message(entity, text, parse_mode=pm)
         return True, None
     except FloodWaitError as e:
         wait = e.seconds
@@ -54,11 +56,11 @@ async def safe_send_media(client, entity, text, file=None, image=None):
             await asyncio.sleep(wait)
             try:
                 if file:
-                    await client.send_file(entity, file, caption=text)
+                    await client.send_file(entity, file, caption=text, parse_mode=pm)
                 elif image:
-                    await client.send_file(entity, image, caption=text)
+                    await client.send_file(entity, image, caption=text, parse_mode=pm)
                 else:
-                    await client.send_message(entity, text)
+                    await client.send_message(entity, text, parse_mode=pm)
                 return True, None
             except Exception as e2:
                 return False, str(e2)
