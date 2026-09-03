@@ -122,14 +122,23 @@ class DB:
 
     # ---- session 持久化（PostgreSQL） ----
     @classmethod
-
-    @classmethod
     def list_sessions(cls, prefix: str = "") -> list:
         """返回所有 session 名称中带指定前缀的账号序号列表（升序）。
         例如 prefix='tg_session_' 返回 [1,2,3]，用于重启后自动恢复账号。"""
-        with cls.cursor() as cur:
-            cur.execute("SELECT name FROM tg_sessions WHERE name LIKE %s", (prefix + '%',))
-            rows = cur.fetchall()
+        try:
+            conn = cls.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM tg_sessions WHERE name LIKE %s",
+                        (prefix + '%',),
+                    )
+                    rows = cur.fetchall()
+            finally:
+                cls.putconn(conn)
+        except Exception as e:
+            log.warning(f"⚠️ list_sessions[{prefix}] 失败: {e}")
+            return []
         nums = []
         for (name,) in rows:
             tail = name[len(prefix):]
