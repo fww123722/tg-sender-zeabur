@@ -10,7 +10,8 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
-from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, LOGIN_STATE, ZIP_RECEIVED, API_ID, API_HASH, OWNER_ID, log
+import config
+from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, ZIP_RECEIVED, API_ID, API_HASH, OWNER_ID, log
 
 
 async def login_send(bot, text):
@@ -24,14 +25,14 @@ async def login_send(bot, text):
 async def login_wait_reply(timeout=300):
     """等待 owner 的下一条回复（从队列取）。超时返回 None。"""
     try:
-        return await asyncio.wait_for(LOGIN_STATE["queue"].get(), timeout=timeout)
+        return await asyncio.wait_for(config.LOGIN_STATE["queue"].get(), timeout=timeout)
     except asyncio.TimeoutError:
         return None
 
 
 async def login_flow(bot, client, phone, acc_no, owner_entity):
     """完整的交互式登录状态机。
-    前置条件：LOGIN_STATE 已设置、client 已 connect 且未授权。
+    前置条件：config.LOGIN_STATE 已设置、client 已 connect 且未授权。
     成功返回 True。"""
     from telethon.errors import (
         PhoneCodeExpiredError,
@@ -40,7 +41,6 @@ async def login_flow(bot, client, phone, acc_no, owner_entity):
         SessionPasswordNeededError,
     )
 
-    global LOGIN_STATE
     try:
         for attempt in (1, 2, 3):
             await login_send(bot, f"📱 [账号{acc_no}] 正在向 {phone} 发送验证码…（第 {attempt}/3 次）")
@@ -105,17 +105,16 @@ async def login_flow(bot, client, phone, acc_no, owner_entity):
         await login_send(bot, f"✅ [账号{acc_no}] 登录成功: {me.first_name} (@{me.username})")
         return True
     finally:
-        LOGIN_STATE = None
+        config.LOGIN_STATE = None
 
 
 async def _login_accounts(bot, accounts, targets, owner_entity):
     """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
     登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
-    global LOGIN_STATE
     for acc_no, client, phone in accounts:
         if acc_no not in targets:
             continue
-        if LOGIN_STATE is not None:
+        if config.LOGIN_STATE is not None:
             await login_send(bot, "⏳ 已有登录流程进行中，请先完成或等待超时")
             return
         try:
@@ -125,7 +124,7 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 await login_send(bot, f"⏭️ [账号{acc_no}] 已登录: {me.first_name} (@{me.username})，无需重复登录")
                 continue
 
-            LOGIN_STATE = {
+            config.LOGIN_STATE = {
                 "stage": "code",
                 "acc_no": acc_no,
                 "phone": phone,
@@ -151,7 +150,7 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                     pass
         except Exception as e:
             log.error(f"❌ [账号{acc_no}] 登录异常: {e}")
-            LOGIN_STATE = None
+            config.LOGIN_STATE = None
             try:
                 await bot.send_message(owner_entity, f"❌ [账号{acc_no}] 登录异常: {e}")
                 await client.disconnect()
@@ -163,12 +162,11 @@ async def _add_account_interactive(bot, phone, owner_entity):
     """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
     不依赖环境变量，成功后自动分配下一个可用序号。"""
     from db import DB
-    global LOGIN_STATE
     phone = (phone or "").strip()
     if not re.match(r"^\+?\d{6,15}$", phone):
         await bot.send_message(owner_entity, "❌ 手机号格式无效（应含国家码，如 +8613800138000）")
         return
-    if LOGIN_STATE is not None:
+    if config.LOGIN_STATE is not None:
         await bot.send_message(owner_entity, "⏳ 已有登录流程进行中，请先完成或等待超时")
         return
 
@@ -187,7 +185,7 @@ async def _add_account_interactive(bot, phone, owner_entity):
             await bot.send_message(owner_entity, f"✅ 该手机号已有有效 session: {me.first_name} (@{me.username})")
             return
 
-        LOGIN_STATE = {
+        config.LOGIN_STATE = {
             "stage": "code",
             "acc_no": acc_no,
             "phone": phone,
@@ -215,7 +213,7 @@ async def _add_account_interactive(bot, phone, owner_entity):
                 pass
     except Exception as e:
         log.error(f"❌ [新账号] 添加异常: {e}")
-        LOGIN_STATE = None
+        config.LOGIN_STATE = None
         try:
             await bot.send_message(owner_entity, f"❌ 添加异常: {e}")
             await client.disconnect()

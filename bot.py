@@ -12,7 +12,8 @@ import re
 
 from telethon import events
 
-from config import OWNER_ID, ACTIVE_ACCOUNTS, LOGIN_STATE, state, log
+import config
+from config import OWNER_ID, ACTIVE_ACCOUNTS, state, log
 from db import (
     db_count_targets, db_load_targets, db_sent_global, db_get_all_groups,
     db_group_count, db_load_stats,
@@ -229,13 +230,13 @@ def register_handlers(bot, accounts):
     async def on_auth_reply(event):
         if event.sender_id != OWNER_ID:
             return
-        if LOGIN_STATE is None:
+        if config.LOGIN_STATE is None:
             return
         text = (event.text or "").strip()
         if not text:
             return
         try:
-            LOGIN_STATE["queue"].put_nowait(text)
+            config.LOGIN_STATE["queue"].put_nowait(text)
         except Exception:
             pass
 
@@ -360,7 +361,7 @@ def register_handlers(bot, accounts):
             return
 
         # 4. 登录流程进行中 → 跳过，让 on_auth_reply 独享
-        if LOGIN_STATE:
+        if config.LOGIN_STATE:
             return
 
         # 5. 未登录状态下多余输入提示
