@@ -20,7 +20,7 @@ from telethon.tl.types import (
 )
 
 from config import log
-from db import db_add_targets, db_count_targets, db_add_group
+from db import db_add_targets, db_count_targets, db_add_group, db_get_all_groups
 
 
 async def collect_members(client, peer_arg, limit=5000):
@@ -121,18 +121,17 @@ def db_count_pool():
         DB.putconn(conn)
 
 
-async def list_my_groups(client):
-    """列出当前账号加入的所有群/频道。"""
-    result = ["📁 你加入的群/频道：\n"]
-    try:
-        dialogs = await client.get_dialogs()
-        for d in dialogs:
-            e = d.entity
-            if isinstance(e, (Channel, Chat)):
-                uname = getattr(e, "username", "") or ""
-                result.append(f"• {getattr(e, 'title', '?')}  (id={e.id})  @{uname}")
-    except Exception as e:
-        return f"❌ {e}"
+async def list_my_groups(client=None):
+    """列出通过本 Bot 加入/导入的群/频道（数据源：DB groups_info 表，
+    不遍历 Telegram 全部会话，避免把账号原有的群/私聊也列出来）。"""
+    rows = db_get_all_groups()
+    if not rows:
+        return "📁 还没有通过本 Bot 加入的群。\n点「加群」或「批量导入」加入后会自动记录在这里。"
+    result = [f"📁 通过本 Bot 加入的群/频道（共 {len(rows)} 个）：\n"]
+    for gid, title, username, member_count, _creator in rows:
+        uname = f"  @{username}" if username else ""
+        mc = f"  成员:{member_count}" if member_count else ""
+        result.append(f"• {title or '(无标题)'}  (id={gid}){uname}{mc}")
     return "\n".join(result)
 
 
