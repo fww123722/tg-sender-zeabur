@@ -281,6 +281,7 @@ def register_handlers(bot, accounts):
             "acc_add_prompt": None, "add_group_prompt": None,
             "batch_import_prompt": None, "set_speed_prompt": None,
             "set_quota_prompt": None, "set_parallel_prompt": None,
+            "acc_edit_profile_prompt": None,
             "camp_step3": None, "camp_step1": None,
         }
 
@@ -385,6 +386,8 @@ def register_handlers(bot, accounts):
             return groups_menu_kb
         if action == "acc_add_prompt":
             return accounts_menu_kb
+        if action == "acc_edit_profile_prompt":
+            return accounts_menu_kb
         return None
 
     # ---------- 消费一个 pending 输入 ----------
@@ -403,6 +406,8 @@ def register_handlers(bot, accounts):
         elif action == "acc_add_prompt":
             await _reply(event, f"🔄 开始添加账号 {text} …", buttons=accounts_menu_kb())
             await _add_account_interactive(bot, text, event.chat_id)
+        elif action == "acc_edit_profile_prompt":
+            await _run_editprofile(event, accounts, text)
         elif action == "set_speed_prompt":
             try:
                 sec = max(1, int(text))
@@ -593,7 +598,7 @@ def register_handlers(bot, accounts):
         finally:
             state["busy"] = False
 
-    async def _run_editprofile(event, accounts):
+    async def _run_editprofile(event, accounts, name=None):
         if _no_accounts(event):
             return
         if state["busy"]:
@@ -601,8 +606,17 @@ def register_handlers(bot, accounts):
             return
         state["busy"] = True
         try:
-            await _reply(event, "🔄 正在批量修改账号资料（名字/姓氏/用户名/简介/头像）…")
-            r = await edit_all_profiles(event.chat_id)
+            # 「跳过」= 不改名字，只处随机用户名
+            if name and name.strip() in ("跳过", "skip", "-"):
+                name = None
+            uname = (name or "").strip()
+            await _reply(
+                event,
+                "🔄 正在批量修改账号资料…\n"
+                f"  统一名字：{uname or '(不改)'}\n"
+                "  用户名：无用户名的账号自动随机生成（已有的不动）",
+            )
+            r = await edit_all_profiles(event.chat_id, name=name or None, username_mode="random")
             await _reply(event, r, buttons=accounts_menu_kb())
         finally:
             state["busy"] = False

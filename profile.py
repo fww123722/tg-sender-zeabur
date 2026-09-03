@@ -18,7 +18,7 @@ import string
 
 from telethon.errors import (
     FloodWaitError,
-    InvalidUsernameError,
+    UsernameInvalidError,
     UsernameNotModifiedError,
     UsernameOccupiedError,
 )
@@ -80,7 +80,7 @@ async def _set_username(client, acc_no, new_user, taken):
         except UsernameOccupiedError:
             log.info(f"[账号{acc_no}] 用户名 @{new_user} 已被占用，重新生成…")
             new_user = gen_username(taken=taken)
-        except InvalidUsernameError:
+        except UsernameInvalidError:
             log.info(f"[账号{acc_no}] 用户名 @{new_user} 非法，重新生成…")
             new_user = gen_username(taken=taken)
         except UsernameNotModifiedError:
