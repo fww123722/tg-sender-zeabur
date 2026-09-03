@@ -22,7 +22,7 @@ from telethon.errors import (
     UsernameNotModifiedError,
     UsernameOccupiedError,
 )
-from telethon.tl.functions.account import UpdateProfileRequest
+from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
 
 from config import ACTIVE_ACCOUNTS, DATA_DIR, log
@@ -74,7 +74,7 @@ async def _set_username(client, acc_no, new_user, taken):
     """设置用户名，被占用则自动重试随机生成。返回结果描述或 None。"""
     for attempt in range(8):
         try:
-            await client(UpdateProfileRequest(username=new_user))
+            await client(UpdateUsernameRequest(new_user))
             taken.add(new_user)
             return f"用户名→@{new_user}"
         except UsernameOccupiedError:
@@ -122,7 +122,7 @@ async def _apply_profile(client, acc_no, profile, taken_usernames):
 
         # ---- 简介 ----
         new_bio = profile.get("about")
-        if new_bio is not None and new_bio != (me.bio or ""):
+        if new_bio is not None:
             try:
                 await client(UpdateProfileRequest(about=new_bio))
                 changed.append(f"简介→{new_bio[:20] or '(已删除)'}")
