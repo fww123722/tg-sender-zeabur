@@ -139,6 +139,7 @@ class DB:
                 continue
         return sorted(nums)
 
+    @classmethod
     def load_session(cls, name: str):
         try:
             conn = cls.getconn()
