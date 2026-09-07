@@ -33,10 +33,18 @@ from ops_state import (
 from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
-    settings_menu_kb, dashboard_menu_kb,
+    settings_menu_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
-    accounts_menu_text, settings_menu_text,
+    accounts_menu_text, settings_menu_text, report_menu_text,
 )
+from reasons import REPORT_REASONS, REASON_CN
+from reporter import (
+    report_user, report_custom, report_super, cooldown_summary,
+)
+from ai import load_ai_config
+
+# 举报理由按钮文字 -> 理由 key 的反查表
+REASON_TEXT_TO_KEY = {v[0]: k for k, v in REPORT_REASONS.items()}
 
 # 按钮输入等待状态: {chat_id: 当前响应的动作标识}
 pending_action = {}
@@ -47,16 +55,6 @@ async def _reply(event, text, buttons=None):
         return await event.client.send_message(event.chat_id, text, buttons=buttons)
     except Exception:
         return None
-
-
-def _nice_name(acc_no, client):
-    try:
-        import asyncio as _a
-        me_fut = asyncio.ensure_future(client.get_me())
-        _a.get_event_loop()
-    except Exception:
-        pass
-    return f"账号{acc_no}"
 
 
 # ---- 设置持久化读写（每账号状态存内存，设置落 DB） ----
@@ -262,12 +260,14 @@ def register_handlers(bot, accounts):
         "menu_groups": groups_menu_text,
         "menu_accounts": accounts_menu_text,
         "menu_settings": settings_menu_text,
+        "menu_report": report_menu_text,
     }
     MENU_KB = {
         "menu_campaign": campaign_menu_kb,
         "menu_groups": groups_menu_kb,
         "menu_accounts": accounts_menu_kb,
         "menu_settings": settings_menu_kb,
+        "menu_report": report_menu_kb,
     }
 
     def _menu_text(action):
@@ -279,13 +279,6 @@ def register_handlers(bot, accounts):
     async def _handle_menu_action(event, action):
         """执行一个菜单动作（不含需要输入的 INPUT_ACTIONS）。"""
         cid = event.sender_id
-        special = {
-            "acc_add_prompt": None, "add_group_prompt": None,
-            "batch_import_prompt": None, "set_speed_prompt": None,
-            "set_quota_prompt": None, "set_parallel_prompt": None,
-            "acc_edit_profile_prompt": None,
-            "camp_step3": None, "camp_step1": None,
-        }
 
         # --- 输入类：先设 pending 并给提示 ---
         if action in INPUT_ACTIONS:
@@ -339,6 +332,15 @@ def register_handlers(bot, accounts):
             await _reply(event, "🛑 已停止当前任务", buttons=campaign_menu_kb())
         elif action == "back_home":
             await _push_main_menu(event)
+        # ---- 举报中心 ----
+        elif action == "rep_reason_menu":
+            await _reply(event, "📋 请选择举报理由：", buttons=reason_menu_kb())
+        elif action == "rep_status":
+            await _reply(event, f"⏳ 账号冷却状态\n\n{cooldown_summary()}\n\n"
+                                "（举报后账号进入30分钟冷却，防止触发风控）",
+                                buttons=report_menu_kb())
+        elif action == "back_report":
+            await _reply(event, report_menu_text(), buttons=report_menu_kb())
 
     # ---------- 菜单动作统一分发（含 pending_input 处理） ----------
     @bot.on(events.NewMessage())
@@ -353,6 +355,13 @@ def register_handlers(bot, accounts):
         if text in BTN_ACTION:
             action = BTN_ACTION[text]
             await _handle_menu_action(event, action)
+            return
+
+        # 1.5 举报理由按钮 → 进入「指定理由」目标输入
+        if text in REASON_TEXT_TO_KEY:
+            pending_action[event.sender_id] = ("rep_reason_target", REASON_TEXT_TO_KEY[text])
+            await _reply(event, f"已选理由：{text}\n请发送要举报的用户/频道用户名或链接：",
+                         buttons=report_menu_kb())
             return
 
         # 2. 数字快捷选群（从「我的群」返回的群序号，预留）
@@ -394,6 +403,18 @@ def register_handlers(bot, accounts):
 
     # ---------- 消费一个 pending 输入 ----------
     async def _consume_input(event, action, text):
+        # 指定理由举报：pending 是元组 ("rep_reason_target", reason_key)
+        if isinstance(action, tuple) and action and action[0] == "rep_reason_target":
+            reason_key = action[1]
+            await _start_report(event, accounts, mode="custom",
+                               target=text, reason_key=reason_key)
+            return
+        if action == "rep_user_prompt":
+            await _start_report(event, accounts, mode="user", target=text)
+            return
+        if action == "rep_channel_ai_prompt":
+            await _start_report(event, accounts, mode="super", target=text)
+            return
         if action == "camp_step1":
             await _do_step1(event, accounts, text)
         elif action == "camp_step3":
@@ -605,6 +626,49 @@ def register_handlers(bot, accounts):
         finally:
             state["busy"] = False
             state["paused"] = False
+
+    # ---------- 举报中心：统一入口 ----------
+    async def _start_report(event, accounts, mode, target, reason_key=None):
+        """启动一次举报任务（user/custom/super）。"""
+        if not accounts:
+            await _reply(event, "⚠️ 当前没有可用账号，请先添加账号。", buttons=report_menu_kb())
+            return
+        if state["busy"]:
+            await _reply(event, "⏳ 正在执行其他任务，请稍后再试。", buttons=report_menu_kb())
+            return
+        state["busy"] = True
+        try:
+            await _reply(event, f"🔍 准备举报目标：{target}\n模式：{mode}\n正在分配可用账号...",
+                         buttons=report_menu_kb())
+            ai_cfg = load_ai_config()
+            if mode == "user":
+                res = await report_user(target, status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+            elif mode == "custom":
+                res = await report_custom(target, reason_key,
+                                         status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+            elif mode == "super":
+                status_note = "（已启用 AI 自动生成理由）" if ai_cfg else "（未配置 AI，使用兜底理由）"
+                await _reply(event, f"🤖 AI 批量举报 {status_note}", buttons=report_menu_kb())
+                res = await report_super(target, ai_cfg=ai_cfg,
+                                        status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+            else:
+                res = None
+            if res:
+                body = (
+                    f"✅ 举报完成！\n\n"
+                    f"📌 目标: {res.get('target', target)}\n"
+                    + (f"原因: {res.get('reason_name', '')}\n" if res.get('reason_name') else "")
+                    + f"👤 账号: {res['total']} | ✅ {res['success']} | ⚠️ {res['partial']} | ❌ {res['fail']}\n"
+                    f"⏳ 状态: {res['summary']}\n"
+                    + (f"\n🎯 策略: {res['strategy']}\n" if res.get('strategy') else "")
+                    + (f"\n📊 原因分布：\n{res['stats_text']}\n" if res.get('stats_text') else "")
+                    + (f"\n📋 详情：\n{res['text']}" if res.get('text') else "")
+                )
+                await _reply(event, body, buttons=report_menu_kb())
+            else:
+                await _reply(event, "❌ 举报未执行（无可用账号或目标解析失败）。", buttons=report_menu_kb())
+        finally:
+            state["busy"] = False
 
     # ---------- 过滤 & 改资料 ----------
     async def _run_filter(event, accounts):

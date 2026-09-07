@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制全部模块源码
 COPY *.py .
+COPY law.json .
 
 # 数据目录（Zeabur Volume 挂载点：session 文件与日志）
 RUN mkdir -p /data \

@@ -8,7 +8,7 @@ import sys
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from config import ACCS, API_ID, API_HASH, BOT_TOKEN, OWNER_ID, N_ACCOUNTS, log
+from config import ACCS, API_ID, API_HASH, BOT_TOKEN, OWNER_ID, log
 from config import ACTIVE_ACCOUNTS, ZIP_RECEIVED
 from db import DB
 from health import start_health_server
@@ -151,7 +151,7 @@ async def main():
 
     await bot.send_message(
         OWNER_ID,
-        f"🟢 群发系统已上线，{len(ready)}/{N_ACCOUNTS} 个账号可用。\n"
+        f"🟢 群发系统已上线，{len(ready)} 个账号可用。\n"
         "点 /menu 打开控制面板。",
     )
 

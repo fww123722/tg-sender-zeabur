@@ -17,6 +17,7 @@ BTN = {
     "accounts": "👥 账号管理",
     "dashboard": "📊 数据看板",
     "settings": "⚙️ 系统设置",
+    "report": "🚨 举报",
     # 群发运营子菜单
     "camp_step1": "① 选择群",
     "camp_step2": "② 拉取名单",
@@ -50,6 +51,12 @@ BTN = {
     "resume": "▶️ 继续",
     "stop": "🛑 停止任务",
     "refresh": "🔄 刷新",
+    # 举报子菜单
+    "rep_user": "👤 举报用户/频道",
+    "rep_channel_ai": "🤖 AI 批量举报",
+    "rep_reason": "📋 指定理由举报",
+    "rep_status": "⏳ 账号冷却状态",
+    "back_report": "🔙 返回举报菜单",
 }
 
 # ---- 所有按钮 → 动作标识 ----
@@ -59,6 +66,7 @@ BTN_ACTION = {
     BTN["accounts"]: "menu_accounts",
     BTN["dashboard"]: "menu_dashboard",
     BTN["settings"]: "menu_settings",
+    BTN["report"]: "menu_report",
     BTN["camp_step1"]: "camp_step1",
     BTN["camp_step2"]: "camp_step2",
     BTN["camp_step3"]: "camp_step3",
@@ -81,6 +89,11 @@ BTN_ACTION = {
     BTN["resume"]: "resume",
     BTN["stop"]: "stop",
     BTN["refresh"]: "refresh",
+    BTN["rep_user"]: "rep_user_prompt",
+    BTN["rep_channel_ai"]: "rep_channel_ai_prompt",
+    BTN["rep_reason"]: "rep_reason_menu",
+    BTN["rep_status"]: "rep_status",
+    BTN["back_report"]: "back_report",
     BTN["back"]: "back_home",
 }
 
@@ -95,6 +108,8 @@ INPUT_ACTIONS = {
     "set_parallel_prompt",
     "camp_step3",  # 写文案：输入内容
     "camp_step1",  # 选群：输入群链接/ID
+    "rep_user_prompt",  # 举报用户：输入用户名/链接
+    "rep_channel_ai_prompt",  # AI批量：输入频道/群组
 }
 
 INPUT_HINTS = {
@@ -107,6 +122,8 @@ INPUT_HINTS = {
     "set_parallel_prompt": "请输入并行发送的账号数（例如 3）：",
     "camp_step3": "请输入要群发的文案内容（可多行文字）：",
     "camp_step1": "请发送群链接或群ID：",
+    "rep_user_prompt": "请发送要举报的用户/频道用户名或链接（@username 或 t.me/xxx）：",
+    "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
 }
 
 
@@ -125,11 +142,11 @@ def _kb(rows):
 #  各菜单键盘
 # =====================================================================
 def main_menu_kb():
-    """主菜单：5 个主按钮"""
+    """主菜单：6 个主按钮"""
     return _kb([
         (BTN["campaign"], BTN["groups"]),
         (BTN["accounts"], BTN["dashboard"]),
-        (BTN["settings"],),
+        (BTN["settings"], BTN["report"]),
     ])
 
 
@@ -179,6 +196,26 @@ def dashboard_menu_kb():
     ])
 
 
+def report_menu_kb():
+    """举报菜单：三种模式 + 状态 + 返回主菜单"""
+    return _kb([
+        (BTN["rep_user"], BTN["rep_reason"]),
+        (BTN["rep_channel_ai"], BTN["rep_status"]),
+        (BTN["back"],),
+    ])
+
+
+def reason_menu_kb():
+    """理由选择键盘（10 种两列）+ 返回举报菜单"""
+    from reasons import REPORT_REASONS
+    keys = list(REPORT_REASONS.keys())
+    rows = []
+    for i in range(0, len(keys), 2):
+        rows.append(tuple(REPORT_REASONS[k][0] for k in keys[i:i + 2]))
+    rows.append((BTN["back_report"],))
+    return _kb(rows)
+
+
 # =====================================================================
 #  各菜单文本
 # =====================================================================
@@ -221,3 +258,14 @@ def accounts_menu_text():
 
 def settings_menu_text():
     return "⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数、文本模式。"
+
+
+def report_menu_text():
+    return (
+        "🚨 举报中心\n\n"
+        "👤 举报用户/频道 — 选理由直接举报\n"
+        "📋 指定理由举报 — 先选理由再发目标\n"
+        "🤖 AI 批量举报 — 拉消息→AI生成理由→多账号齐发\n"
+        "⏳ 账号冷却状态 — 查看可用/休息中账号\n\n"
+        "⚠️ 举报后账号进入30分钟冷却，防止风控。"
+    )

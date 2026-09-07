@@ -1,0 +1,130 @@
+{
+  "_description": "EU Law Reference for Telegram Content Reporting — organized by violation type with exact article citations",
+  "_updated": "2026-07-06",
+
+  "dsa": {
+    "title": "Digital Services Act — Regulation (EU) 2022/2065",
+    "scope": "Harmonised rules for a safe, predictable and trusted online environment",
+    "articles": {
+      "illegal_content_removal": {
+        "art_9": "Orders to act against illegal content — intermediaries must inform authorities of follow-up actions against specific illegal content, specifying if and when orders were executed.",
+        "art_16": "Notice and action mechanisms — platforms must allow any individual/entity to notify them of illegal content; must process notices in a timely, diligent, non-arbitrary and objective manner."
+      },
+      "platform_obligations": {
+        "art_20": "Internal complaint-handling system — platforms must provide effective complaint mechanisms for at least 6 months after content removal decisions.",
+        "art_23": "Measures against misuse — platforms must suspend users who frequently provide manifestly illegal content or submit manifestly unfounded complaints."
+      },
+      "transparency": {
+        "art_15": "Transparency reporting for intermediary services — publish clear reports on content moderation, orders received, and notices processed.",
+        "art_24": "Platform transparency — report disputes, suspensions for misuse, and use of automated moderation.",
+        "art_27": "Recommender system transparency — disclose main parameters in plain language."
+      },
+      "child_safety": {
+        "art_28": "Online protection of minors — platforms accessible to minors must implement appropriate measures ensuring high level of privacy, safety and security; no profiling-based advertising to minors."
+      },
+      "penalties": {
+        "art_52": "Fines — up to 6% of annual worldwide turnover for non-compliance with DSA obligations.",
+        "art_54": "Supervision and enforcement by Digital Services Coordinators in each Member State."
+      }
+    }
+  },
+
+  "child_protection": {
+    "title": "Directive 2011/93/EU — Combating Sexual Abuse and Sexual Exploitation of Children and Child Pornography",
+    "articles": {
+      "offenses": {
+        "art_3": "Sexual abuse of a child — engaging in sexual activities with a child below age of consent.",
+        "art_4": "Sexual exploitation — causing/coercing child into pornographic performances, recruiting child into prostitution.",
+        "art_5": "Child pornography offenses — acquisition, possession, distribution, dissemination, production, offering, supplying, making available; knowingly obtaining access via ICT. This covers ALL forms including digital distribution via Telegram channels.",
+        "art_6": "Solicitation of children (grooming) — proposing via ICT to meet a child for sexual abuse or child pornography production."
+      },
+      "reporting": {
+        "art_15": "Any person who knows about or suspects child sexual abuse/exploitation is encouraged to report to competent services.",
+        "art_16": "Professionals working with children must report reasonable grounds of offense to child protection or law enforcement."
+      },
+      "platform_measures": {
+        "art_25": "Member States must ensure removal of webpages containing child pornography hosted in their territory; shall endeavor to obtain removal of pages hosted outside territory; may block access with transparent procedures."
+      },
+      "penalties": {
+        "art_9": "Offenders may be temporarily/permanently disqualified from activities involving contact with children.",
+        "art_10": "Legal persons (companies/organizations) can be held liable for offenses committed for their benefit.",
+        "art_13": "Sanctions against legal persons — criminal/non-criminal fines, exclusion from public benefits, disqualification, judicial winding-up, closure of establishments."
+      }
+    }
+  },
+
+  "gdpr": {
+    "title": "General Data Protection Regulation — Regulation (EU) 2016/679",
+    "scope": "Protection of natural persons with regard to processing of personal data and free movement of such data",
+    "articles": {
+      "illegal_processing": {
+        "art_5": "Principles: lawfulness, fairness, transparency, purpose limitation, data minimization, accuracy, storage limitation, integrity, confidentiality.",
+        "art_6": "Lawfulness — processing only lawful with consent, contract, legal obligation, vital interests, public task, or legitimate interests.",
+        "art_9": "Special categories — prohibition on processing sensitive data (racial/ethnic, political, religious, genetic, biometric, health, sexual orientation) unless specific exception applies."
+      },
+      "data_rights": {
+        "art_17": "Right to erasure ('right to be forgotten') — obligation to delete personal data without undue delay on specified grounds including unlawfully processed data.",
+        "art_18": "Right to restriction of processing where accuracy is contested or processing is unlawful.",
+        "art_21": "Right to object to processing based on legitimate interests or direct marketing."
+      },
+      "breach_notification": {
+        "art_33": "Personal data breach must be notified to supervisory authority without undue delay, where feasible within 72 hours.",
+        "art_34": "Communication of breach to affected data subjects without undue delay when high risk to rights and freedoms."
+      },
+      "penalties": {
+        "art_83": "Administrative fines up to €20 million or 4% of total worldwide annual turnover (whichever is higher) for serious infringements including violations of data subject rights and unlawful processing.",
+        "art_84": "Member States shall lay down additional penalties for non-administrative-fine infringements."
+      }
+    }
+  },
+
+  "terrorist_content": {
+    "title": "Regulation (EU) 2021/784 — Addressing the dissemination of terrorist content online",
+    "articles": {
+      "art_3": "Hosting service providers must remove or disable access to terrorist content within one hour of receiving a removal order from competent authorities.",
+      "art_5": "Platforms exposed to terrorist content must take specific measures to protect their services against its dissemination — including technical and operational measures.",
+      "art_6": "Preservation of content and related data for administrative or judicial proceedings.",
+      "art_18": "Penalties for systematic failure to comply — Member States must lay down effective, proportionate and dissuasive penalties."
+    }
+  },
+
+  "fraud": {
+    "title": "Directive (EU) 2019/713 — Combating fraud and counterfeiting of non-cash means of payment",
+    "articles": {
+      "art_3": "Fraudulent use of stolen/counterfeited payment instruments.",
+      "art_4": "Offenses related to the fraudulent making, obtaining, or supplying of instruments used for payment fraud — including digital payment methods.",
+      "art_6": "Criminalizes the making available of an information system enabling the fraudulent use of payment instruments.",
+      "art_7": "Criminalizes the use of fraudulently obtained payment data.",
+      "art_11": "Penalties — Member States must ensure offenses are punishable by effective criminal penalties with maximum imprisonment of at least 2 to 5 years depending on offense severity."
+    }
+  },
+
+  "harassment_violence": {
+    "title": "Framework Decision 2008/913/JHA on combating certain forms of racism and xenophobia + applicable provisions",
+    "articles": {
+      "violence_threats": "Platforms are required under DSA Art. 23 to suspend users who frequently post violent threats or organize harassment campaigns. Cyberstalking and coordinated harassment are criminal offenses in all EU Member States under national law transposing Directive 2012/29/EU (Victims' Rights Directive).",
+      "organized_harassment": "Organized mass-reporting to silence or damage users constitutes abuse of platform systems contrary to DSA Art. 23 (measures against misuse). Coordinated harassment campaigns may constitute criminal organization offenses under national laws of Member States.",
+      "hate_speech": "Public incitement to violence or hatred directed against a group or member of such group defined by race, color, religion, descent, or national/ethnic origin is criminalized under Framework Decision 2008/913/JHA."
+    }
+  },
+
+  "drugs": {
+    "title": "Council Framework Decision 2004/757/JHA — Illicit drug trafficking",
+    "articles": {
+      "art_2": "Member States must criminalize the production, manufacture, extraction, preparation, offering, offering for sale, distribution, sale, delivery, brokerage, dispatch, transport, importation or exportation of drugs.",
+      "art_3": "Criminalizes the cultivation of opium poppy, coca bush or cannabis plant.",
+      "art_4": "Penalties — effective, proportionate and dissuasive criminal penalties; maximum penalties of at least 1 to 10 years imprisonment for most serious offenses."
+    }
+  },
+
+  "how_to_use": {
+    "citation_format": "According to {law_title}, Article {number}: '{provision}' — this channel/user is clearly in violation because...",
+    "example_citation": "Under the Digital Services Act (Regulation 2022/2065), Article 28 on Online Protection of Minors, platforms accessible to minors must implement measures ensuring a high level of privacy, safety, and security. This channel is actively endangering minors by...",
+    "recommended_authorities": [
+      "Europol (European Union Agency for Law Enforcement Cooperation)",
+      "National Data Protection Authority of the relevant Member State",
+      "NCMEC (National Center for Missing and Exploited Children) — for child-related content",
+      "Relevant Member State's law enforcement cybercrime unit"
+    ]
+  }
+}
