@@ -5,10 +5,18 @@
 两种用法：
 1) Bot 交互（推荐）：直接传 name / bio / username_mode，不依赖任何文件。
    username_mode: "skip" 不改 | "random" 每账号生成随机可用用户名 | 其他字符串=统一用户名
+   random_names=True 时每账号随机英文姓名；random_avatar=True 时每账号随机真实风景图头像
 2) 文件模式（兼容 qfbot Win 端「配置」目录）：名字.txt / 姓氏.txt / 用户名.txt / 简介.txt / 头像*.jpg
 
 Telegram 用户名规则：5-32 位，字母/数字/下划线，必须字母开头，不能下划线结尾，全局唯一。
 """
+import asyncio
+import glob
+import os
+import random
+import re
+import string
+import urllib.request
 import asyncio
 import glob
 import os
@@ -30,6 +38,51 @@ from config import ACTIVE_ACCOUNTS, DATA_DIR, log
 # 随机用户名生成字符集（首字母必须是字母，末位不能是下划线，这里干脆不用下划线）
 _U_FIRST = string.ascii_lowercase
 _U_REST = string.ascii_lowercase + string.digits
+
+# 随机英文姓名池（常见英文名，自然不突兀）
+FIRST_NAMES = [
+    "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Thomas", "Chris",
+    "Daniel", "Matthew", "Anthony", "Mark", "Steven", "Andrew", "Joshua", "Kevin", "Brian", "Edward",
+    "Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia", "Charlotte", "Amelia", "Harper", "Evelyn",
+    "Abigail", "Emily", "Elizabeth", "Sofia", "Madison", "Avery", "Ella", "Grace", "Chloe", "Victoria",
+]
+LAST_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
+    "Anderson", "Taylor", "Thomas", "Moore", "Jackson", "Martin", "Lee", "Thompson", "White", "Harris",
+    "Clark", "Lewis", "Walker", "Hall", "Allen", "Young", "King", "Wright", "Scott", "Green",
+    "Baker", "Adams", "Nelson", "Carter", "Mitchell", "Turner", "Phillips", "Campbell", "Parker", "Bennett",
+]
+
+# 风景图下载源：真实 Flickr 风景照优先，picsum 随机实拍图兜底
+_LANDSCAPE_URLS = [
+    "https://loremflickr.com/640/640/landscape,nature,mountain,sea,forest?random={}",
+    "https://picsum.photos/640/640?random={}",
+]
+
+
+def gen_en_name():
+    """随机英文姓名，返回 (first_name, last_name)。"""
+    return random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
+
+
+def fetch_random_landscape(save_dir, tag):
+    """同步下载一张随机风景图到 save_dir，返回文件路径或 None。tag 用于破缓存。"""
+    os.makedirs(save_dir, exist_ok=True)
+    for i, tpl in enumerate(_LANDSCAPE_URLS):
+        url = tpl.format(tag)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            if len(data) < 8000:  # 太小的图多半是错误页/占位图
+                continue
+            path = os.path.join(save_dir, f"avatar_{tag}_{i}.jpg")
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        except Exception as e:
+            log.warning(f"风景图下载失败({url[:40]}…): {e}")
+    return None
 
 
 def gen_username(length=None, taken=None):
@@ -178,7 +231,8 @@ async def _apply_avatar(client, acc_no, avatar_path):
 
 
 async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
-                            username_mode="skip", avatar=None, profiles_dir=None):
+                            username_mode="skip", avatar=None, profiles_dir=None,
+                            random_names=False, random_avatar=False):
     """遍历全部活跃账号，批量修改资料与头像。
 
     参数（Bot 交互模式直接传，不传则回退读配置目录）：
@@ -187,6 +241,8 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
       bio           统一简介（None=不改，""或"删除"=清空）
       username_mode "skip"不改 / "random"每账号随机生成 / 其他字符串=统一设置
       avatar        头像文件路径（None=不改）
+      random_names  True=每账号随机英文姓名（覆盖 name/last_name）
+      random_avatar True=每账号下载一张随机真实风景图作头像
     """
     if not ACTIVE_ACCOUNTS:
         return "❌ 当前没有可用账号"
@@ -215,9 +271,10 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
 
     has_edit = bool(profile.get("first_name") or profile.get("last_name") is not None
                     or profile.get("about") is not None
+                    or random_names
                     or profile["_username_mode"] not in ("skip", None, ""))
 
-    if not has_edit and not avatar:
+    if not has_edit and not avatar and not random_avatar:
         return ("❌ 没有要修改的内容。\n"
                 "请点「批量改资料」后按提示输入统一名字，"
                 "或在配置目录放 名字.txt / 简介.txt / 头像*.jpg。")
@@ -235,11 +292,26 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
     results = []
     if has_edit:
         results.append(f"📝 待改账号 {len(ACTIVE_ACCOUNTS)} 个 | "
-                       f"名字={profile.get('first_name') or '(不改)'} | "
+                       f"名字={'随机英文姓名' if random_names else (profile.get('first_name') or '(不改)')} | "
                        f"用户名={'随机生成' if profile['_username_mode'] == 'random' else (profile['_username_mode'] or '不改')}")
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
-            results.append(await _apply_profile(client, acc_no, profile, taken))
+            p = dict(profile)
+            if random_names:
+                fn, ln = gen_en_name()
+                p["first_name"] = fn
+                p["last_name"] = ln
+            results.append(await _apply_profile(client, acc_no, p, taken))
             await asyncio.sleep(2)  # 账号之间间隔，避免风控
+    if random_avatar:
+        results.append("🖼 随机风景头像：每账号下载一张不同风景图…")
+        for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
+            tag = f"{acc_no}_{random.randint(100000, 999999)}"
+            path = await asyncio.to_thread(fetch_random_landscape, DATA_DIR, tag)
+            if not path:
+                results.append(f"❌ [账号{acc_no}] 风景图下载失败，跳过")
+                continue
+            results.append(await _apply_avatar(client, acc_no, path))
+            await asyncio.sleep(2)
     if avatar:
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
             results.append(await _apply_avatar(client, acc_no, avatar))

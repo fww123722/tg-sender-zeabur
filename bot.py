@@ -34,9 +34,9 @@ from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_menu_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
-    group_pick_kb, group_del_kb,
+    group_pick_kb, group_del_kb, profile_menu_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
-    accounts_menu_text, settings_menu_text, report_menu_text,
+    accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
 )
 from reasons import REPORT_REASONS, REASON_CN
 from reporter import (
@@ -346,8 +346,14 @@ def register_handlers(bot, accounts):
             await _acc_list(event, accounts)
         elif action == "acc_filter":
             await _run_filter(event, accounts)
-        elif action == "acc_edit_profile":
-            await _run_editprofile(event, accounts)
+        elif action == "profile_menu":
+            await _reply(event, profile_menu_text(), buttons=profile_menu_kb())
+        elif action == "profile_random":
+            await _run_editprofile(event, accounts, random_mode=True)
+        elif action == "back_accounts":
+            await _reply(event, accounts_menu_text(), buttons=accounts_menu_kb())
+        elif action == "back_groups":
+            await _reply(event, groups_menu_text(), buttons=groups_menu_kb())
         elif action == "camp_status":
             await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(), buttons=campaign_menu_kb())
         elif action == "camp_step1":
@@ -808,7 +814,7 @@ def register_handlers(bot, accounts):
         finally:
             state["busy"] = False
 
-    async def _run_editprofile(event, accounts, name=None):
+    async def _run_editprofile(event, accounts, name=None, random_mode=False):
         if _no_accounts(event):
             return
         if state["busy"]:
@@ -816,6 +822,14 @@ def register_handlers(bot, accounts):
             return
         state["busy"] = True
         try:
+            if random_mode:
+                await _reply(event,
+                    "🎲 开始一键养号：随机英文姓名 + 随机真实风景头像 + 补随机用户名…\n"
+                    "每账号间隔 2 秒，稍等。")
+                r = await edit_all_profiles(event.chat_id, random_names=True,
+                                            random_avatar=True, username_mode="random")
+                await _reply(event, r, buttons=accounts_menu_kb())
+                return
             # 「跳过」= 不改名字，只处随机用户名
             if name and name.strip() in ("跳过", "skip", "-"):
                 name = None

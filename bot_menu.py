@@ -33,6 +33,9 @@ BTN = {
     "acc_add": "添加账号",
     "acc_edit_profile": "批量改资料",
     "acc_filter": "账号过滤",
+    # 改资料子菜单
+    "profile_random": "🎲 随机英文名+风景头像",
+    "profile_name": "✏️ 统一名字(手动输入)",
     # 数据看板
     "dashboard_view": "📊 查看数据",
     # 设置子菜单
@@ -78,8 +81,10 @@ BTN_ACTION = {
     BTN["del_group"]: "del_group_menu",
     BTN["acc_list"]: "acc_list",
     BTN["acc_add"]: "acc_add_prompt",
-    BTN["acc_edit_profile"]: "acc_edit_profile_prompt",
+    BTN["acc_edit_profile"]: "profile_menu",
     BTN["acc_filter"]: "acc_filter",
+    BTN["profile_random"]: "profile_random",
+    BTN["profile_name"]: "acc_edit_profile_prompt",
     BTN["dashboard_view"]: "dashboard_view",
     BTN["set_speed"]: "set_speed_prompt",
     BTN["set_quota"]: "set_quota_prompt",
@@ -96,6 +101,8 @@ BTN_ACTION = {
     BTN["rep_reason"]: "rep_reason_menu",
     BTN["rep_status"]: "rep_status",
     BTN["back_report"]: "back_report",
+    BTN["back_accounts"]: "back_accounts",
+    BTN["back_groups"]: "back_groups",
     BTN["back"]: "back_home",
 }
 
@@ -198,6 +205,15 @@ def accounts_menu_kb():
     ])
 
 
+def profile_menu_kb():
+    """改资料子菜单：随机一键 / 手动统一名字 / 返回"""
+    return _kb([
+        (BTN["profile_random"],),
+        (BTN["profile_name"],),
+        (BTN["back_accounts"],),
+    ])
+
+
 def settings_menu_kb():
     """系统设置菜单：间隔 / 上限 / 文本模式 / 近7天活跃 / 重复推广"""
     return _kb([
@@ -271,6 +287,16 @@ def groups_menu_text():
 
 def accounts_menu_text():
     return "👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料、过滤检测。"
+
+
+def profile_menu_text():
+    return (
+        "📝 批量改资料\n\n"
+        "🎲 随机英文名+风景头像 — 每账号随机英文姓名 + 随机真实风景图头像，"
+        "并为无用户名账号生成随机用户名（一键养号）\n"
+        "✏️ 统一名字 — 手动输入一个名字，所有账号改成同一个\n\n"
+        "⚠️ 每次修改间隔 2 秒防风控；头像为在线下载的真实风景照。"
+    )
 
 
 def settings_menu_text(recent_on=None, repeat_on=None):
