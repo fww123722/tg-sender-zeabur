@@ -96,6 +96,54 @@ def _is_rate_limited(err) -> bool:
     )
 
 
+async def _send_one(client, acc_no, uid, info, text, file=None, image=None):
+    """用指定账号给单个目标发一条：实体三级解析 + 限流退避重试 + access_hash 失效兜底。
+    返回 (status, err)，status ∈ "ok"/"fail"/"skip"（skip=实体压根解析不出来，不算发送失败）。"""
+    uname = (info.get("username") or "").strip().lstrip("@")
+    ah = info.get("access_hash", 0) or 0
+    entity = None
+    # ① 优先 @username：让 Telegram 自己解析，不吃跨账号 access_hash 失效
+    if uname:
+        try:
+            entity = await client.get_entity(uname)
+        except Exception as e:
+            log.info(f"[账号{acc_no}] @{uname} 解析失败，回退 access_hash: {e}")
+            entity = None
+    # ② 回退名单里存的 access_hash
+    if entity is None and ah:
+        try:
+            entity = InputPeerUser(int(uid), int(ah))
+        except Exception as e:
+            log.warning(f"[账号{acc_no}] 构造 InputPeerUser 失败 {uid}: {e}")
+            entity = None
+    # ③ 再回退：从本账号实体缓存里解析数字 ID
+    if entity is None:
+        try:
+            entity = await client.get_entity(int(uid))
+        except Exception as e:
+            log.warning(f"[账号{acc_no}] 跳过 {uid}: {e}")
+            return "skip", str(e)
+    ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+    # ④ 限流（430 Too many requests / 慢模式）：退避后重试，别直接判失败
+    for _w in (8, 25):
+        if ok or not _is_rate_limited(err):
+            break
+        log.info(f"[账号{acc_no}] 限流等待 {_w}s 后重试 {uid}（{str(err)[:40]}）")
+        await asyncio.sleep(_w)
+        ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+    # ⑤ access_hash 失效/实体不可达兜底：换一种解析方式再试一次
+    if not ok and _is_bad_peer(err):
+        try:
+            if uname:
+                entity = await client.get_entity(uname)
+            else:
+                entity = await client.get_input_entity(int(uid))
+            ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+        except Exception as e2:
+            err = f"{err} | 重新解析实体也失败: {e2}"
+    return ("ok" if ok else "fail"), (None if ok else err)
+
+
 async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None, bot=None):
     """多个账号轮流派发目标，各自控制频率，并发执行。
     群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。
@@ -128,6 +176,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         "skipped": 0,       # 跳过（已发过/解析失败）
         "per_acc": {acc_no: {"sent": 0, "fail": 0} for acc_no, *_ in accounts},
     }
+    # 第一轮发送失败的目标：{uid: (acc_no, err)}，供第二轮换账号补发判断
+    first_round_fail = {}
 
     async def progress_reporter():
         """后台协程：每 15 秒向 owner 汇总推送一次进度"""
@@ -177,51 +227,13 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 progress["skipped"] += 1
                 progress["done"] += 1
                 continue
-            info = targets.get(uid, {})
-            uname = (info.get("username") or "").strip().lstrip("@")
-            ah = info.get("access_hash", 0) or 0
-            entity = None
-            # ① 优先 @username：让 Telegram 自己解析，不吃跨账号 access_hash 失效
-            if uname:
-                try:
-                    entity = await client.get_entity(uname)
-                except Exception as e:
-                    log.info(f"[账号{acc_no}] @{uname} 解析失败，回退 access_hash: {e}")
-                    entity = None
-            # ② 回退名单里存的 access_hash
-            if entity is None and ah:
-                try:
-                    entity = InputPeerUser(int(uid), int(ah))
-                except Exception as e:
-                    log.warning(f"[账号{acc_no}] 构造 InputPeerUser 失败 {uid}: {e}")
-                    entity = None
-            # ③ 再回退：从本账号实体缓存里解析数字 ID
-            if entity is None:
-                try:
-                    entity = await client.get_entity(int(uid))
-                except Exception as e:
-                    log.warning(f"[账号{acc_no}] 跳过 {uid}: {e}")
-                    progress["skipped"] += 1
-                    progress["done"] += 1
-                    continue
-            ok, err = await safe_send_media(client, entity, text, file=file, image=image)
-            # ④ 限流（430 Too many requests / 慢模式）：退避后重试，别直接判失败
-            for _w in (8, 25):
-                if ok or not _is_rate_limited(err):
-                    break
-                log.info(f"[账号{acc_no}] 限流等待 {_w}s 后重试 {uid}（{str(err)[:40]}）")
-                await asyncio.sleep(_w)
-                ok, err = await safe_send_media(client, entity, text, file=file, image=image)
-            # ⑤ access_hash 失效/实体不可达兜底：换一种解析方式再试一次
-            if not ok and _is_bad_peer(err):
-                try:
-                    if uname:
-                        entity2 = await client.get_entity(uname)
-                    else:
-                        entity2 = await client.get_input_entity(int(uid))
-                    ok, err = await safe_send_media(client, entity2, text, file=file, image=image)
-                except Exception as e2:
-                    err = f"{err} | 重新解析实体也失败: {e2}"
+            status, err = await _send_one(client, acc_no, uid, targets.get(uid, {}),
+                                          text, file=file, image=image)
+            if status == "skip":
+                progress["skipped"] += 1
+                progress["done"] += 1
+                continue
+            ok = status == "ok"
             progress["done"] += 1
             if ok:
                 progress["sent"] += 1
@@ -233,6 +245,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             else:
                 progress["fail"] += 1
                 progress["per_acc"][acc_no]["fail"] += 1
+                first_round_fail[uid] = (acc_no, err)
                 log.warning(f"[账号{acc_no}] 发送失败 {uid}: {err}")
             delay = random.uniform(state["min_delay"], state["max_delay"])
             await asyncio.sleep(delay)
@@ -254,6 +267,42 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         await reporter
     except asyncio.CancelledError:
         pass
+
+    # ===== 第二轮补发：把因限流/实体失效失败的目标，换别的账号再试 =====
+    # 场景：目标数 < 账号数时轮转分配，被限流的账号抱着目标死，其余账号全程空跑没用到额度
+    retryable = {u: v for u, v in first_round_fail.items()
+                 if _is_rate_limited(v[1]) or _is_bad_peer(v[1])}
+    if retryable and len(accounts) > 1 and not state["stop"]:
+        await _report(f"🔁 第二轮补发：{len(retryable)} 个目标换账号重试")
+        for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
+            info = targets.get(uid, {})
+            tried = {orig_acc}
+            for j in range(1, len(accounts)):
+                if state["stop"]:
+                    break
+                acc_no2, client2, _ph2 = accounts[(i + j) % len(accounts)]
+                if acc_no2 in tried:
+                    continue
+                tried.add(acc_no2)
+                if uid in db_load_sent(acc_no2):
+                    continue
+                st, err2 = await _send_one(client2, acc_no2, uid, info, text,
+                                           file=file, image=image)
+                if st == "ok":
+                    pa = progress["per_acc"].get(orig_acc)
+                    if pa and pa["fail"] > 0:
+                        pa["fail"] -= 1
+                    progress["fail"] = max(0, progress["fail"] - 1)
+                    progress["sent"] += 1
+                    pa2 = progress["per_acc"].get(acc_no2)
+                    if pa2 is not None:
+                        pa2["sent"] += 1
+                    db_add_sent(acc_no2, uid)
+                    db_bump_sent(acc_no2)
+                    log.info(f"[账号{acc_no2}] 第二轮补发成功 {uid}"
+                             f"（原账号{orig_acc} 失败：{str(orig_err)[:40]}）")
+                    break
+                await asyncio.sleep(random.uniform(state["min_delay"], state["max_delay"]))
 
     pct = 100.0 if not progress["total"] else (progress["done"] / progress["total"] * 100)
     parts = []
