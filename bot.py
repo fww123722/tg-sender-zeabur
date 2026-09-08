@@ -65,6 +65,8 @@ def _load_settings():
     s.setdefault("max_delay", state["max_delay"])
     s.setdefault("daily_limit", state["daily_limit"])
     s.setdefault("parse_mode", None)
+    s.setdefault("recent_only_days", 0)
+    s.setdefault("allow_repeat", False)
     return s
 
 
@@ -74,6 +76,8 @@ def _apply_settings_to_state():
     state["max_delay"] = s["max_delay"]
     state["daily_limit"] = s["daily_limit"]
     state["parse_mode"] = s.get("parse_mode")
+    state["recent_only_days"] = s.get("recent_only_days", 0)
+    state["allow_repeat"] = s.get("allow_repeat", False)
 
 
 async def _push_main_menu(event):
@@ -292,6 +296,9 @@ def register_handlers(bot, accounts):
     }
 
     def _menu_text(action):
+        if action == "menu_settings":
+            _apply_settings_to_state()
+            return settings_menu_text(state.get("recent_only_days"), state.get("allow_repeat"))
         base = MENU_SHOW[action]()
         if action == "menu_campaign":
             base += "\n\n" + campaign_text()
@@ -362,6 +369,31 @@ def register_handlers(bot, accounts):
             state["paused"] = True
             state["busy"] = False
             await _reply(event, "🛑 已停止当前任务", buttons=campaign_menu_kb())
+        elif action == "set_recent_filter":
+            _apply_settings_to_state()
+            s = _load_settings()
+            new = 0 if s.get("recent_only_days") else 7
+            s["recent_only_days"] = new
+            ops_set("settings", s)
+            state["recent_only_days"] = new
+            await _reply(event,
+                ("✅ 已开启「近7天活跃」：拉取成员时只保留近 7 天内上线过的用户。"
+                 if new else "❌ 已关闭「近7天活跃」：拉取全部有效成员（不看上线时间）。")
+                + f"\n\n{settings_menu_text(new, s.get('allow_repeat'))}",
+                buttons=settings_menu_kb())
+        elif action == "set_repeat":
+            _apply_settings_to_state()
+            s = _load_settings()
+            new = not s.get("allow_repeat", False)
+            s["allow_repeat"] = new
+            ops_set("settings", s)
+            state["allow_repeat"] = new
+            await _reply(event,
+                ("✅ 已开启「重复推广」：同一账号可以再次推给已发过的用户（适合换文案重推）。"
+                 if new else
+                 "❌ 已关闭「重复推广」：每人只推一次，已发过的自动跳过。")
+                + f"\n\n{settings_menu_text(s.get('recent_only_days'), new)}",
+                buttons=settings_menu_kb())
         elif action == "back_home":
             await _push_main_menu(event)
         # ---- 举报中心 ----

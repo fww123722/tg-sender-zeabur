@@ -43,6 +43,7 @@ BTN = {
     "set_parallel": "并行账号数",
     "set_parsemode": "文本模式",
     "set_recent": "近7天活跃",
+    "set_repeat": "重复推广",
     # 通用
     "back": "🔙 返回主菜单",
     "back_campaign": "🔙 返回群发运营",
@@ -89,6 +90,7 @@ BTN_ACTION = {
     BTN["set_parallel"]: "set_parallel_prompt",
     BTN["set_parsemode"]: "set_parsemode",
     BTN["set_recent"]: "set_recent_filter",
+    BTN["set_repeat"]: "set_repeat",
     BTN["pause"]: "pause",
     BTN["resume"]: "resume",
     BTN["stop"]: "stop",
@@ -202,10 +204,11 @@ def accounts_menu_kb():
 
 
 def settings_menu_kb():
-    """系统设置菜单：间隔 / 上限 / 并行数 / 文本模式"""
+    """系统设置菜单：间隔 / 上限 / 文本模式 / 近7天活跃 / 重复推广"""
     return _kb([
         (BTN["set_speed"], BTN["set_quota"]),
-        (BTN["set_parallel"], BTN["set_parsemode"], BTN["set_recent"]),
+        (BTN["set_parsemode"],),
+        (BTN["set_recent"], BTN["set_repeat"]),
         (BTN["back"],),
     ])
 
@@ -275,9 +278,13 @@ def accounts_menu_text():
     return "👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料、过滤检测。"
 
 
-def settings_menu_text():
-    return ("⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数、文本模式。\n"
-            "「近7天活跃」：开启后拉取成员只保留近7天内上线的有效成员。")
+def settings_menu_text(recent_on=None, repeat_on=None):
+    lines = ["⚙️ 系统设置", "", "• 发送间隔 / 每日上限 — 点按钮后输入数字", "• 文本模式 — 点击切换：纯文本 → HTML → Markdown"]
+    if recent_on is not None:
+        lines.append(f"• 近7天活跃 — 当前：{'✅ 开（只拉近7天上线过的成员）' if recent_on else '❌ 关（拉全部有效成员）'}")
+    if repeat_on is not None:
+        lines.append(f"• 重复推广 — 当前：{'✅ 开（同一人可再次推送）' if repeat_on else '❌ 关（每人只推一次）'}")
+    return "\n".join(lines)
 
 
 def report_menu_text():

@@ -154,7 +154,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             if stats["sent_today"] >= state["daily_limit"]:
                 await _report(f"🚫 账号{acc_no} 今日已达上限 {state['daily_limit']} 条，该账号停止")
                 return
-            if uid in sent_set:
+            if uid in sent_set and not state.get("allow_repeat"):
                 progress["skipped"] += 1
                 progress["done"] += 1
                 continue
