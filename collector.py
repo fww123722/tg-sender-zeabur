@@ -48,6 +48,21 @@ from config import log
 from db import db_add_targets, db_count_targets, db_add_group, db_get_all_groups
 
 
+def _norm_gid(did, entity=None):
+    """对话 id 归一化为原始正数 id（与 groups_info 表存法一致）。
+    basic群(Chat): id=-chat_id → chat_id；频道/超级群(Channel): id=-100channel_id → channel_id。"""
+    from telethon.tl.types import Chat
+    n = int(did)
+    if entity is not None and isinstance(entity, Chat):
+        return abs(n)
+    if n < 0:
+        s = str(n)
+        if s.startswith("-100"):
+            return int(s[4:])
+        return -n
+    return n
+
+
 async def _resolve_entity(client, peer_arg):
     """解析群实体（失败抛异常）。纯数字 ID 在 session 无缓存时会查不到，先扫对话列表建立缓存再重试。"""
     try:
@@ -70,9 +85,9 @@ async def _resolve_entity(client, peer_arg):
                 return await client.get_entity(peer)
             except Exception:
                 pass
-        # 兜底：扫对话按绝对值匹配，兼容原始/-负数(basic群)/-100前缀(频道) 三种形态
+        # 兜底：扫对话按归一化 id 精确匹配（兼容 basic群/超级群/频道 三种形态）
         async for dialog in client.iter_dialogs(limit=200):
-            if abs(dialog.id) == raw:
+            if _norm_gid(dialog.id, dialog.entity) == raw:
                 return dialog.entity
         raise first_err
 
@@ -249,10 +264,11 @@ async def diag_groups(accounts):
         gs = [d for d in dialogs if getattr(d.entity, "title", None) is not None]
         out.append(f"\n[账号{acc_no}] 真实群/频道 {len(gs)} 个：")
         for d in gs[:50]:
-            mark = "✅在表" if abs(d.id) in table_ids or d.id in table_ids else "❌不在表"
-            if abs(d.id) in table_ids or d.id in table_ids:
-                found_ids.add(abs(d.id))
-            out.append(f"  · id={d.id} 「{d.title}」 {mark}")
+            nid = _norm_gid(d.id, d.entity)
+            hit = nid in table_ids
+            if hit:
+                found_ids.add(nid)
+            out.append(f"  · id={d.id} 「{d.title}」 {'✅在表' if hit else '❌不在表'}")
     missing = table_ids - found_ids
     if missing:
         out.append("\n⚠️ 表里有但没有任何账号在群里的僵尸记录：")
