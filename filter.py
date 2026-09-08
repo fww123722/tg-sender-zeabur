@@ -90,3 +90,46 @@ async def filter_accounts(owner_entity, out_dir=None, limit=5000, per_user_delay
         f"结果已保存到 {out_dir}"
     )
     return summary
+
+
+async def check_login_accounts(accounts):
+    """体检 Bot 已登录的推送账号（ACTIVE_ACCOUNTS），不是收集来的用户名单。
+    accounts: [(acc_no, client, phone)]。返回可读汇总文本，不写文件、不发消息。"""
+    from telethon.errors import (
+        AuthKeyUnregisteredError, SessionExpiredError, SessionRevokedError,
+        UserDeactivatedError, UserDeactivatedBanError, UserDeletedError,
+        PhoneNumberBannedError, FloodWaitError, FloodError, PeerFloodError,
+    )
+    if not accounts:
+        return "⚠️ 当前没有已登录的推送账号。\n点「添加账号」登录后再体检。"
+    lines = ["🩺 推送账号体检（Bot 登录账号，非收集名单）", ""]
+    ok_n = frozen_n = dead_n = err_n = 0
+    for acc_no, client, phone in accounts:
+        uname = phone or "?"
+        try:
+            # is_user_authorized() 是 async（漏 await 会让“会话失效”判定完全失效）
+            if not await client.is_user_authorized():
+                raise AuthKeyUnregisteredError(request=None)
+            me = await client.get_me()
+            uname = getattr(me, "username", None) or getattr(me, "phone", None) or "?"
+            await client.get_dialogs(limit=1)  # 轻量真实探测
+            lines.append(f"  ✅ [账号{acc_no}] @{uname} 正常")
+            ok_n += 1
+        except FloodWaitError as e:
+            lines.append(f"  ⏳ [账号{acc_no}] @{uname} 限流：{e.seconds}s 后可用")
+            frozen_n += 1
+        except (FloodError, PeerFloodError) as e:
+            lines.append(f"  ⏳ [账号{acc_no}] @{uname} 严重限流（{type(e).__name__}）")
+            frozen_n += 1
+        except (AuthKeyUnregisteredError, SessionExpiredError, SessionRevokedError):
+            lines.append(f"  ❌ [账号{acc_no}] @{uname} 会话失效/已登出，需重新登录")
+            dead_n += 1
+        except (UserDeactivatedError, UserDeactivatedBanError, UserDeletedError,
+                PhoneNumberBannedError) as e:
+            lines.append(f"  🚫 [账号{acc_no}] @{uname} 账号被封/删除（{type(e).__name__}）")
+            err_n += 1
+        except Exception as e:
+            lines.append(f"  ⚠️ [账号{acc_no}] @{uname} 异常：{type(e).__name__}: {str(e)[:50]}")
+            err_n += 1
+    lines += ["", "—", f"统计：正常 {ok_n} | 限流 {frozen_n} | 失效 {dead_n} | 异常 {err_n}"]
+    return "\n".join(lines)

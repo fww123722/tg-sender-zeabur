@@ -4,6 +4,7 @@
 
 bot.py 只负责 handler 逻辑，不混入按钮文字和键盘布局。
 """
+from telethon import Button
 from telethon.tl.types import KeyboardButton, KeyboardButtonRow, ReplyKeyboardMarkup
 
 
@@ -153,11 +154,10 @@ def _kb(rows):
 #  各菜单键盘
 # =====================================================================
 def main_menu_kb():
-    """主菜单：6 个主按钮"""
+    """主菜单：3×2 布局（第一行 群发/群管理/账号，第二行 看板/设置/举报）"""
     return _kb([
-        (BTN["campaign"], BTN["groups"]),
-        (BTN["accounts"], BTN["dashboard"]),
-        (BTN["settings"], BTN["report"]),
+        (BTN["campaign"], BTN["groups"], BTN["accounts"]),
+        (BTN["dashboard"], BTN["settings"], BTN["report"]),
     ])
 
 
@@ -179,6 +179,47 @@ def group_pick_kb(groups):
         rows.append((f"📤 {i}·{title}",))
     rows.append((BTN["back"],))
     return _kb(rows)
+
+
+def _row(*btns):
+    """Button.inline() 返回单个按钮对象，这里打包成一整行。"""
+    return list(btns)
+
+
+def group_pick_inline_kb(groups):
+    """选群（内联键盘，附在消息上）。callback data = gp:<序号>，每行 2 个。"""
+    rows = []
+    cur = []
+    for i, g in enumerate(groups, 1):
+        title = (g[1] or g[2] or str(g[0]))[:20]
+        cur.append(Button.inline(f"📤 {i}·{title}", f"gp:{i}".encode()))
+        if len(cur) == 2:
+            rows.append(cur)
+            cur = []
+    if cur:
+        rows.append(cur)
+    rows.append([Button.inline(BTN["back_campaign"], b"gp:back")])
+    return rows
+
+
+def settings_inline_kb(recent_on=False, repeat_on=False, parse_label="纯文本",
+                       speed=None, quota=None):
+    """系统设置（内联键盘，附在消息上）：当前值直接标在按钮上，
+    数字项用 +/- 步进按钮，不需要用户发文字。data 全 ASCII。"""
+    sp = f"⚡ 发送间隔 {speed}s" if speed else "⚡ 发送间隔"
+    q = f"🎯 每日上限 {quota}" if quota else "🎯 每日上限"
+    return [
+        _row(Button.inline(sp, b"st:speed:show")),
+        _row(Button.inline("－1", b"st:speed:-1"), Button.inline("＋1", b"st:speed:+1"),
+             Button.inline("＋5", b"st:speed:+5"), Button.inline("＋10", b"st:speed:+10")),
+        _row(Button.inline(q, b"st:quota:show")),
+        _row(Button.inline("－10", b"st:quota:-10"), Button.inline("＋10", b"st:quota:+10"),
+             Button.inline("＋50", b"st:quota:+50"), Button.inline("＋100", b"st:quota:+100")),
+        _row(Button.inline(f"✍️ 文本模式：{parse_label}", b"st:parse")),
+        _row(Button.inline(f"🕒 近7天活跃：{'✅ 开' if recent_on else '❌ 关'}", b"st:recent"),
+             Button.inline(f"🔁 重复推广：{'✅ 开' if repeat_on else '❌ 关'}", b"st:repeat")),
+        _row(Button.inline(BTN["back"], b"st:home")),
+    ]
 
 
 def groups_menu_kb():
@@ -298,7 +339,7 @@ def groups_menu_text():
 
 
 def accounts_menu_text():
-    return "👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料、过滤检测。"
+    return "👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料。\n💡「账号过滤」检测的是 **Bot 已登录的推送账号**（不是收集来的用户名单）。"
 
 
 def profile_menu_text():
@@ -312,11 +353,15 @@ def profile_menu_text():
 
 
 def settings_menu_text(recent_on=None, repeat_on=None):
-    lines = ["⚙️ 系统设置", "", "• 发送间隔 / 每日上限 — 点按钮后输入数字", "• 文本模式 — 点击切换：纯文本 → HTML → Markdown"]
+    lines = ["⚙️ 系统设置", "",
+             "下面的按钮直接调，不用打字：",
+             "• 发送间隔 / 每日上限 — 点 －／＋ 步进调数，点当前值可查看",
+             "• 文本模式 — 点击切换：纯文本 → HTML → Markdown"]
     if recent_on is not None:
         lines.append(f"• 近7天活跃 — 当前：{'✅ 开（只拉近7天上线过的成员）' if recent_on else '❌ 关（拉全部有效成员）'}")
     if repeat_on is not None:
         lines.append(f"• 重复推广 — 当前：{'✅ 开（同一人可再次推送）' if repeat_on else '❌ 关（每人只推一次）'}")
+    lines += ["", "💡 设置直接标在按钮上，改完自动保存并生效。"]
     return "\n".join(lines)
 
 

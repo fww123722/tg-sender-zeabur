@@ -24,7 +24,7 @@ from collector import (
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
-from filter import filter_accounts
+from filter import check_login_accounts
 from accounts import _login_accounts, _add_account_interactive
 from ops_state import (
     get_campaign, set_campaign, clear_campaign, campaign_text,
@@ -33,8 +33,8 @@ from ops_state import (
 from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
-    settings_menu_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
-    group_pick_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
+    settings_inline_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
+    group_pick_inline_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
 )
@@ -78,6 +78,20 @@ def _apply_settings_to_state():
     state["parse_mode"] = s.get("parse_mode")
     state["recent_only_days"] = s.get("recent_only_days", 0)
     state["allow_repeat"] = s.get("allow_repeat", False)
+
+
+PARSE_LABEL = {None: "纯文本", "html": "HTML", "md": "Markdown"}
+
+
+def _settings_kb():
+    """系统设置内联键盘（附在消息上，按钮显示当前值）。"""
+    return settings_inline_kb(
+        recent_on=bool(state.get("recent_only_days")),
+        repeat_on=bool(state.get("allow_repeat")),
+        parse_label=PARSE_LABEL.get(state.get("parse_mode"), "纯文本"),
+        speed=state.get("min_delay"),
+        quota=state.get("daily_limit"),
+    )
 
 
 async def _push_main_menu(event):
@@ -277,7 +291,7 @@ def register_handlers(bot, accounts):
         if name == "accounts":
             return lambda e: show(e, accounts_menu_text(), accounts_menu_kb)
         if name == "settings":
-            return lambda e: show(e, settings_menu_text(), settings_menu_kb)
+            return lambda e: show(e, settings_menu_text(), _settings_kb)
         return lambda e: _push_main_menu(e)
 
     MENU_SHOW = {
@@ -291,7 +305,7 @@ def register_handlers(bot, accounts):
         "menu_campaign": campaign_menu_kb,
         "menu_groups": groups_menu_kb,
         "menu_accounts": accounts_menu_kb,
-        "menu_settings": settings_menu_kb,
+        "menu_settings": _settings_kb,
         "menu_report": report_menu_kb,
     }
 
@@ -418,7 +432,7 @@ def register_handlers(bot, accounts):
                 ("✅ 已开启「近7天活跃」：拉取成员时只保留近 7 天内上线过的用户。"
                  if new else "❌ 已关闭「近7天活跃」：拉取全部有效成员（不看上线时间）。")
                 + f"\n\n{settings_menu_text(new, s.get('allow_repeat'))}",
-                buttons=settings_menu_kb())
+                buttons=_settings_kb())
         elif action == "set_repeat":
             _apply_settings_to_state()
             s = _load_settings()
@@ -431,7 +445,7 @@ def register_handlers(bot, accounts):
                  if new else
                  "❌ 已关闭「重复推广」：每人只推一次，已发过的自动跳过。")
                 + f"\n\n{settings_menu_text(s.get('recent_only_days'), new)}",
-                buttons=settings_menu_kb())
+                buttons=_settings_kb())
         elif action == "back_home":
             await _push_main_menu(event)
         # ---- 举报中心 ----
@@ -515,6 +529,91 @@ def register_handlers(bot, accounts):
         if m and not state["busy"] and accounts:
             await _auto_addgroup(event, accounts, m.group(0))
 
+    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 选群） ----------
+    @bot.on(events.CallbackQuery)
+    async def on_callback(event):
+        if event.sender_id != OWNER_ID:
+            await event.answer("⛔ 无权限", alert=True)
+            return
+        data = (event.data or b"").decode("utf-8", "replace")
+        try:
+            if data.startswith("st:"):
+                await _cb_settings(event, data[3:])
+            elif data.startswith("gp:"):
+                await _cb_grouppick(event, data[3:])
+            else:
+                await event.answer()
+        except Exception as e:
+            log.warning(f"[回调] {data!r} 处理失败: {e}", exc_info=True)
+            try:
+                await event.answer(f"❌ {type(e).__name__}", alert=True)
+            except Exception:
+                pass
+
+    async def _cb_settings(event, rest):
+        """设置内联按钮：st:recent / st:repeat / st:parse / st:speed:+5 / st:quota:-10 / st:home"""
+        if rest == "home":
+            await event.answer()
+            await _push_main_menu(event)
+            return
+        s = _load_settings()
+        tip = ""
+        if rest == "recent":
+            new = 0 if s.get("recent_only_days") else 7
+            s["recent_only_days"] = new
+            tip = "已开启：只拉近7天活跃成员" if new else "已关闭：拉全部有效成员"
+        elif rest == "repeat":
+            new = not s.get("allow_repeat", False)
+            s["allow_repeat"] = new
+            tip = "已开启：同一人可重复推" if new else "已关闭：每人只推一次"
+        elif rest == "parse":
+            order = [None, "html", "md"]
+            cur = s.get("parse_mode") if s.get("parse_mode") in order else None
+            nxt = order[(order.index(cur) + 1) % 3]
+            s["parse_mode"] = nxt
+            tip = f"文本模式：{PARSE_LABEL[nxt]}"
+        elif rest.startswith("speed:") or rest.startswith("quota:"):
+            kind, op = rest.split(":", 1)
+            if op == "show":
+                cur = s.get("min_delay") if kind == "speed" else s.get("daily_limit")
+                await event.answer(f"当前：{cur}" + ("s" if kind == "speed" else " 条/日"))
+                return
+            try:
+                delta = int(op)
+            except ValueError:
+                await event.answer("无效步进", alert=True)
+                return
+            if kind == "speed":
+                s["min_delay"] = max(1, min(int(s.get("min_delay", 5)) + delta, 600))
+                s["max_delay"] = s["min_delay"] + 10
+                tip = f"发送间隔：{s['min_delay']}s（随机 +10s）"
+            else:
+                s["daily_limit"] = max(1, min(int(s.get("daily_limit", 50)) + delta, 100000))
+                tip = f"每日上限：{s['daily_limit']} 条/账号"
+        else:
+            await event.answer()
+            return
+        ops_set("settings", s)
+        _apply_settings_to_state()
+        await event.edit(settings_menu_text(state.get("recent_only_days"),
+                                            state.get("allow_repeat")),
+                         buttons=_settings_kb())
+        await event.answer(tip)
+
+    async def _cb_grouppick(event, arg):
+        """选群内联按钮：gp:<序号> / gp:back"""
+        if arg == "back":
+            await event.answer()
+            await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(),
+                         buttons=campaign_menu_kb())
+            return
+        await event.answer("正在拉取成员…")
+        try:
+            n = int(arg)
+        except ValueError:
+            return
+        await _campaign_group_chosen(event, accounts, n)
+
     def _menu_kb_for_action(action):
         if action in ("camp_step3",):  # 文案输入时保留群发菜单
             return campaign_menu_kb
@@ -577,9 +676,9 @@ def register_handlers(bot, accounts):
                 s["min_delay"], s["max_delay"] = sec, sec + 10
                 ops_set("settings", s)
                 state["min_delay"], state["max_delay"] = sec, sec + 10
-                await _reply(event, f"⚡ 间隔已设为 {sec}-{sec+10}s", buttons=settings_menu_kb())
+                await _reply(event, f"⚡ 间隔已设为 {sec}-{sec+10}s", buttons=_settings_kb())
             except ValueError:
-                await _reply(event, "❌ 请输入数字秒数", buttons=settings_menu_kb())
+                await _reply(event, "❌ 请输入数字秒数", buttons=_settings_kb())
         elif action == "set_quota_prompt":
             try:
                 q = max(1, int(text))
@@ -587,12 +686,12 @@ def register_handlers(bot, accounts):
                 s["daily_limit"] = q
                 ops_set("settings", s)
                 state["daily_limit"] = q
-                await _reply(event, f"🎯 每账号每日上限已设为 {q} 条", buttons=settings_menu_kb())
+                await _reply(event, f"🎯 每账号每日上限已设为 {q} 条", buttons=_settings_kb())
             except ValueError:
-                await _reply(event, "❌ 请输入数字条数", buttons=settings_menu_kb())
+                await _reply(event, "❌ 请输入数字条数", buttons=_settings_kb())
         elif action == "set_parallel_prompt":
             await _reply(event, "⏩ 并行账号数由系统按可用账号自动分配，无需手动设置。\n"
-                                "当前可用账号越多，自动分配越快。", buttons=settings_menu_kb())
+                                "当前可用账号越多，自动分配越快。", buttons=_settings_kb())
         elif action == "set_parsemode":
             order = [None, "html", "md"]
             label = {None: "纯文本", "html": "HTML", "md": "Markdown"}
@@ -613,7 +712,7 @@ def register_handlers(bot, accounts):
             await _reply(event,
                 f"✍️ 文本模式已切换为：{label[nxt]}\n\n用法：{tip[nxt]}\n\n"
                 "（再点一次「文本模式」继续切换：纯文本 → HTML → Markdown）",
-                buttons=settings_menu_kb())
+                buttons=_settings_kb())
 
     # ---------- 数据看板 ----------
     async def _dashboard(event):
@@ -675,8 +774,8 @@ def register_handlers(bot, accounts):
         group_map = {str(i): g for i, g in enumerate(groups, 1)}
         state["group_pick_map"] = group_map
         await _reply(event,
-            f"📤 请选择要拉取的群（共 {len(groups)} 个，点按钮）：",
-            buttons=group_pick_kb(groups))
+            f"📤 请选择要拉取的群（共 {len(groups)} 个，点下方按钮）：",
+            buttons=group_pick_inline_kb(groups))
 
     async def _campaign_group_chosen(event, accounts, pick_no):
         """选完群：记录运营群 → 清空旧名单 → 自动拉成员 → 提示写文案。"""
@@ -834,18 +933,14 @@ def register_handlers(bot, accounts):
 
     # ---------- 过滤 & 改资料 ----------
     async def _run_filter(event, accounts):
-        if _no_accounts(event):
+        """账号过滤：检测 Bot 已登录的推送账号状态（不是收集来的用户名单）。"""
+        if not accounts:
+            await _reply(event, "⚠️ 当前没有已登录的推送账号。\n先点「添加账号」登录。",
+                         buttons=accounts_menu_kb())
             return
-        if state["busy"]:
-            await _reply(event, "⏳ 正在执行其他任务")
-            return
-        state["busy"] = True
-        try:
-            await _reply(event, "🔄 正在过滤账号状态（逐个检测，可能较慢）…")
-            r = await filter_accounts(event.chat_id, limit=5000, per_user_delay=1.0)
-            await _reply(event, r, buttons=accounts_menu_kb())
-        finally:
-            state["busy"] = False
+        await _reply(event, "🔄 正在逐个检测推送账号（连接/会话/限流）…")
+        r = await check_login_accounts(accounts)
+        await _reply(event, r, buttons=accounts_menu_kb())
 
     async def _run_editprofile(event, accounts, name=None, random_mode=False):
         if _no_accounts(event):
