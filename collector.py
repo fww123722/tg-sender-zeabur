@@ -413,7 +413,16 @@ async def join_group_all_accounts(accounts, link):
         log.info(f"[加群] 账号{acc_no}({tag}) 结果: {first}")
         lines.append((tag, first, ent, client))
         if first.startswith("✅") or first.startswith("⏳"):
-            return (f"{txt}\n📝 使用账号：{tag}", ent, client)
+            failed = [(t, m) for t, m, _, _ in lines[:-1]]
+            note = ""
+            if failed:
+                det = "；".join(f"{t} → {m[:36]}" for t, m in failed)
+                note = (f"\n⚠️ 未能加入的账号：{det}\n"
+                        f"   同一链接其他账号能加 → 不是链接问题，是该账号单独被拒：\n"
+                        f"   · 最常见：该号被这个群封禁/曾在群里被踢（Telegram 对被封号一律报链接过期）\n"
+                        f"   · 其次：该号被 Telegram 限制加群（找 @SpamBot 查限制）\n"
+                        f"   ✔ 解法：群主到「群设置 → 管理员 → 被封禁的成员」里把它解除，再重发链接。")
+            return (f"{txt}\n📝 使用账号：{tag}{note}", ent, client)
         if idx < len(accounts) - 1:
             await asyncio.sleep(1.2)
     if not lines:
