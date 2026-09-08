@@ -122,14 +122,19 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             await _report_progress(owner_entity, accounts, progress)
 
     async def _report_progress(owner_entity, accounts, progress):
-        pct = (progress["done"] / progress["total"] * 100) if progress["total"] else 100.0
+        total = progress["total"] or 1
+        done = progress["done"]
+        pct = done / total * 100
+        # 进度条：10 格，▰ 完成 ▱ 剩余
+        filled = int(pct // 10)
+        bar = "▰" * filled + "▱" * (10 - filled)
         lines = [
-            f"📊 群发进度：{progress['done']}/{progress['total']}（{pct:.0f}%）",
-            f"   成功 {progress['sent']} | 失败 {progress['fail']} | 跳过 {progress['skipped']}",
+            f"📊 群发进度 {bar} {pct:.0f}%",
+            f"   {done}/{total} | ✅ {progress['sent']} ❌ {progress['fail']} ⏭ {progress['skipped']}",
         ]
         for acc_no, _client, _ph in accounts:
             pa = progress["per_acc"].get(acc_no, {"sent": 0, "fail": 0})
-            lines.append(f"   [账号{acc_no}] 成功 {pa['sent']} | 失败 {pa['fail']}")
+            lines.append(f"   [账号{acc_no}] ✅{pa['sent']} ❌{pa['fail']}")
         await _report("\n".join(lines))
 
     async def worker(client, acc_no, my_uids):

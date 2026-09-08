@@ -18,12 +18,12 @@ BTN = {
     "dashboard": "📊 数据看板",
     "settings": "⚙️ 系统设置",
     "report": "🚨 举报",
-    # 群发运营子菜单
-    "camp_step1": "① 选择群",
+    # 群发运营子菜单（新版 3 步：选群→文案→确认开跑）
+    "camp_step1": "① 选群",
     "camp_step2": "② 拉取名单",
-    "camp_step3": "③ 写文案",
+    "camp_step3": "② 写文案",
     "camp_step4": "④ 账号准备",
-    "camp_start": "⑤ 🚀 开始群发",
+    "camp_start": "③ ✅ 确认开跑",
     "camp_status": "📋 查看进度",
     # 群管理子菜单
     "my_groups": "我的群",
@@ -41,6 +41,7 @@ BTN = {
     "set_quota": "每日上限",
     "set_parallel": "并行账号数",
     "set_parsemode": "文本模式",
+    "set_recent": "近7天活跃",
     # 通用
     "back": "🔙 返回主菜单",
     "back_campaign": "🔙 返回群发运营",
@@ -85,6 +86,7 @@ BTN_ACTION = {
     BTN["set_quota"]: "set_quota_prompt",
     BTN["set_parallel"]: "set_parallel_prompt",
     BTN["set_parsemode"]: "set_parsemode",
+    BTN["set_recent"]: "set_recent_filter",
     BTN["pause"]: "pause",
     BTN["resume"]: "resume",
     BTN["stop"]: "stop",
@@ -107,7 +109,6 @@ INPUT_ACTIONS = {
     "set_quota_prompt",
     "set_parallel_prompt",
     "camp_step3",  # 写文案：输入内容
-    "camp_step1",  # 选群：输入群链接/ID
     "rep_user_prompt",  # 举报用户：输入用户名/链接
     "rep_channel_ai_prompt",  # AI批量：输入频道/群组
 }
@@ -151,14 +152,23 @@ def main_menu_kb():
 
 
 def campaign_menu_kb():
-    """群发运营菜单：5 步 + 查看进度 + 返回"""
+    """群发运营菜单（新版）：选群 / 写文案 / 确认开跑 + 进度控制"""
     return _kb([
-        (BTN["camp_step1"], BTN["camp_step2"]),
-        (BTN["camp_step3"], BTN["camp_step4"]),
+        (BTN["camp_step1"], BTN["camp_step3"]),
         (BTN["camp_start"],),
         (BTN["camp_status"], BTN["pause"], BTN["resume"], BTN["stop"]),
         (BTN["back"],),
     ])
+
+
+def group_pick_kb(groups):
+    """已保存群选择键盘：单列 📤 序号·标题。groups: db_get_all_groups() 返回的行。"""
+    rows = []
+    for i, g in enumerate(groups, 1):
+        title = (g[1] or g[2] or str(g[0]))[:24]
+        rows.append((f"📤 {i}·{title}",))
+    rows.append((BTN["back"],))
+    return _kb(rows)
 
 
 def groups_menu_kb():
@@ -183,7 +193,7 @@ def settings_menu_kb():
     """系统设置菜单：间隔 / 上限 / 并行数 / 文本模式"""
     return _kb([
         (BTN["set_speed"], BTN["set_quota"]),
-        (BTN["set_parallel"], BTN["set_parsemode"]),
+        (BTN["set_parallel"], BTN["set_parsemode"], BTN["set_recent"]),
         (BTN["back"],),
     ])
 
@@ -234,17 +244,14 @@ def main_menu_text(accounts, groups_count, targets_count, sent_count, pool_count
 
 
 def campaign_menu_text():
-    """群发运营菜单文本。"""
+    """群发运营菜单文本（新版 3 步）。"""
     return (
         "🚀 群发运营\n\n"
-        "请按顺序完成各步骤，系统会记住进度，\n"
-        "下次回来接着继续。\n\n"
-        "① 选择群 — 确定目标群\n"
-        "② 拉取名单 — 从群拉取成员\n"
-        "③ 写文案 — 输入群发内容\n"
-        "④ 账号准备 — 检查账号状态\n"
-        "⑤ 开始群发— 多账号自动发送\n\n"
-        "提示：按顺序走，第①步完成后才能做第②步。"
+        "① 选群 — 从已保存的群里点按钮选择，自动拉成员进名单\n"
+        "② 写文案 — 发送文案（支持 HTML 格式）\n"
+        "③ 确认开跑 — 自动检查账号后一键群发\n\n"
+        "发完文案会自动检查账号并提示确认。\n"
+        "进度每 15 秒自动汇报，可暂停/继续/停止。"
     )
 
 
@@ -257,7 +264,8 @@ def accounts_menu_text():
 
 
 def settings_menu_text():
-    return "⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数、文本模式。"
+    return ("⚙️ 系统设置\n\n调整发送间隔、每日上限、并行账号数、文本模式。\n"
+            "「近7天活跃」：开启后拉取成员只保留近7天内上线的有效成员。")
 
 
 def report_menu_text():

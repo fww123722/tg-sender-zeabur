@@ -16,7 +16,7 @@ import config
 from config import OWNER_ID, ACTIVE_ACCOUNTS, state, log
 from db import (
     db_count_targets, db_load_targets, db_sent_global, db_get_all_groups,
-    db_group_count, db_load_stats,
+    db_group_count, db_load_stats, db_clear_targets,
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
@@ -34,6 +34,7 @@ from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_menu_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
+    group_pick_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text,
 )
@@ -313,6 +314,8 @@ def register_handlers(bot, accounts):
             await _run_editprofile(event, accounts)
         elif action == "camp_status":
             await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(), buttons=campaign_menu_kb())
+        elif action == "camp_step1":
+            await _campaign_pick_group(event, accounts)
         elif action == "camp_step2":
             await _do_step2(event, accounts)
         elif action == "camp_step4":
@@ -362,6 +365,13 @@ def register_handlers(bot, accounts):
             pending_action[event.sender_id] = ("rep_reason_target", REASON_TEXT_TO_KEY[text])
             await _reply(event, f"已选理由：{text}\n请发送要举报的用户/频道用户名或链接：",
                          buttons=report_menu_kb())
+            return
+
+        # 1.2 已保存群选群按钮 → 确认拉取
+        m_pick = re.match(r"^📤 (\d+)·", text)
+        if m_pick:
+            pick_no = int(m_pick.group(1))
+            await _campaign_group_chosen(event, accounts, pick_no)
             return
 
         # 2. 数字快捷选群（从「我的群」返回的群序号，预留）
@@ -419,8 +429,24 @@ def register_handlers(bot, accounts):
             await _do_step1(event, accounts, text)
         elif action == "camp_step3":
             set_campaign(text=text)
-            body = campaign_menu_text() + "\n\n✅ 文案已保存：\n" + text[:100] + ("…" if len(text) > 100 else "")
-            body += "\n\n" + campaign_text()
+            # 自动检查账号状态
+            ready = await _check_accounts_ready(event, accounts)
+            if not ready:
+                await _reply(event,
+                    "❌ 没有可用账号，无法群发。请先去「👥 账号管理」处理。",
+                    buttons=campaign_menu_kb())
+                return
+            # HTML 自动检测（仅当文本模式为自动/纯文本时）
+            pm = state.get("parse_mode")
+            import re as _re
+            html_like = bool(_re.search(r"</?(?:b|i|u|s|code|pre|a|br)\b[^>]*>", text))
+            note = ""
+            if html_like and pm in (None, "html"):
+                note = "\n已检测到 HTML 标签，将按 HTML 格式发送。"
+            body = (campaign_menu_text() + "\n\n✅ 文案已保存：\n"
+                    + text[:100] + ("…" if len(text) > 100 else "")
+                    + note + "\n\n" + campaign_text()
+                    + f"\n\n✅ {len(ready)} 个账号就绪，名单 {db_count_targets()} 人。\n点「③ ✅ 确认开跑」开始群发。")
             await _reply(event, body, buttons=campaign_menu_kb())
         elif action == "add_group_prompt":
             await _finish_addgroup(event, accounts, text)
@@ -518,7 +544,62 @@ def register_handlers(bot, accounts):
         lines.append("如需改昵称/头像/简介，点「批量改资料」养号。")
         await _reply(event, "\n".join(lines), buttons=accounts_menu_kb())
 
-    # ---------- 群发运营 5 步 ----------
+    # ---------- 群发运营（新版：选群→文案→自动检查→确认开跑） ----------
+    async def _campaign_pick_group(event, accounts):
+        """① 选群入口：列出已保存的群（groups_info）供按钮选择，无需手动输入。"""
+        if _no_accounts(event):
+            return
+        groups = db_get_all_groups()
+        if not groups:
+            await _reply(event,
+                "❌ 还没有已保存的群。\n"
+                "先去「📥 群管理」加群（加群会自动保存群信息），再回来选群。",
+                buttons=campaign_menu_kb())
+            return
+        if len(groups) > 30:
+            groups = groups[:30]
+        # 序号→群 映射存 state，点击后回查
+        group_map = {str(i): g for i, g in enumerate(groups, 1)}
+        state["group_pick_map"] = group_map
+        await _reply(event,
+            f"📤 请选择要拉取的群（共 {len(groups)} 个，点按钮）：",
+            buttons=group_pick_kb(groups))
+
+    async def _campaign_group_chosen(event, accounts, pick_no):
+        """选完群：记录运营群 → 清空旧名单 → 自动拉成员 → 提示写文案。"""
+        group_map = state.get("group_pick_map") or {}
+        g = group_map.get(str(pick_no))
+        if not g:
+            await _reply(event, "⚠️ 该序号无效，请重新点「① 选群」。", buttons=campaign_menu_kb())
+            return
+        gid, title, username, _mc, _creator = g
+        target = username or str(gid)
+        if state["busy"]:
+            await _reply(event, "⏳ 正在执行其他任务")
+            return
+        state["busy"] = True
+        try:
+            cleared = db_clear_targets()
+            await _reply(event,
+                f"✅ 已选群「{title or target}」\n"
+                f"🧹 已清空旧名单（{cleared} 人）\n"
+                f"🔄 正在拉取成员到名单…")
+            r = await collect_members(accounts[0][1], target,
+                                     recent_only_days=state.get("recent_only_days", 0))
+            await _reply(event, r)
+            set_campaign(group=target, group_title=title or target,
+                         target_count=db_count_targets())
+            await _reply(event,
+                "📝 群已选好，现在直接发送文案（支持 HTML：如 <b>加粗</b> <a href=\"https://t.me\">链接</a>）。\n"
+                "发完会自动检查账号，然后提示确认开跑。",
+                buttons=campaign_menu_kb())
+            # 进入文案输入等待
+            pending_action[event.sender_id] = "camp_step3"
+        except Exception as e:
+            await _reply(event, f"❌ 拉取成员失败：{e}", buttons=campaign_menu_kb())
+        finally:
+            state["busy"] = False
+
     async def _do_step1(event, accounts, text):
         """① 选择群 → 加群并记录为当前运营群（不立刻拉人）"""
         if _no_accounts(event):
@@ -566,6 +647,26 @@ def register_handlers(bot, accounts):
             await _reply(event, body, buttons=campaign_menu_kb())
         finally:
             state["busy"] = False
+
+    async def _check_accounts_ready(event, accounts):
+        """自动检查账号状态：逐个检测连接+可用性，返回就绪账号列表（并实时报告）。"""
+        ready = []
+        lines = ["🔍 自动检查账号状态："]
+        for acc_no, client, _ph in accounts:
+            try:
+                await client.connect()
+                me = await client.get_me()
+                try:
+                    await client.get_dialogs(limit=1)
+                    st = "✅ 可用"
+                    ready.append((acc_no, client, _ph))
+                except Exception:
+                    st = "⏳ 受限"
+                lines.append(f"  [账号{acc_no}] {st}")
+            except Exception as e:
+                lines.append(f"  [账号{acc_no}] ❌ 冻结（{str(e)[:30]}）")
+        await _reply(event, "\n".join(lines))
+        return ready
 
     async def _do_step4(event, accounts):
         """④ 账号准备：显示账号在线数 & 名单下发前是否满足基本条件。"""
@@ -746,7 +847,8 @@ def register_handlers(bot, accounts):
                 except Exception:
                     r1 = "加群失败"
                 try:
-                    r2 = await collect_members(accounts[0][1], link)
+                    r2 = await collect_members(accounts[0][1], link,
+                                           recent_only_days=state.get("recent_only_days", 0))
                 except Exception:
                     r2 = "拉人失败"
                 await _reply(event, f"[{i}/{len(links)}] {link}\n{r1}\n{r2}")
@@ -762,7 +864,8 @@ def register_handlers(bot, accounts):
         try:
             r = await join_group_by_link(accounts[0][1], link)
             await _reply(event, r)
-            r2 = await collect_members(accounts[0][1], link)
+            r2 = await collect_members(accounts[0][1], link,
+                                     recent_only_days=state.get("recent_only_days", 0))
             await _reply(event, r2, buttons=main_menu_kb())
         finally:
             state["busy"] = False

@@ -17,38 +17,104 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.types import (
     Channel, Chat, ChatInvite, ChatInviteAlready, User,
+    UserStatusOnline, UserStatusOffline, UserStatusRecently,
+    UserStatusLastWeek, UserStatusLastMonth, UserStatusLongAgo, UserStatusEmpty,
 )
+
+
+def _is_recently_active(user, days):
+    """判断用户是否在最近 days 天内上线过（近似）。
+    隐私隐藏精确时间时，Recently/LastWeek 视为活跃；LongAgo/LastMonth/Empty 排除。"""
+    from datetime import datetime, timezone
+    st = user.status
+    if st is None:
+        return False
+    if isinstance(st, (UserStatusOnline, UserStatusRecently, UserStatusLastWeek)):
+        return True
+    if isinstance(st, UserStatusOffline):
+        wo = getattr(st, "was_online", None)
+        if wo is None:
+            return False
+        try:
+            now = datetime.now(timezone.utc)
+            if wo.tzinfo is None:
+                wo = wo.replace(tzinfo=timezone.utc)
+            return (now - wo).total_seconds() <= days * 86400
+        except Exception:
+            return False
+    return False
 
 from config import log
 from db import db_add_targets, db_count_targets, db_add_group, db_get_all_groups
 
 
-async def collect_members(client, peer_arg, limit=5000):
+async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     """从群/频道拉取成员并加入名单。"""
     try:
         entity = await client.get_entity(peer_arg)
     except Exception as e:
         return f"❌ 找不到该群/频道: {e}"
+    # 取本账号 id，用于排除“账号自己”
+    try:
+        me = await client.get_me()
+        my_id = me.id if me else None
+    except Exception:
+        my_id = None
     batch = []
     added = 0
+    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0}
     try:
         async for user in client.iter_participants(entity, limit=limit):
-            if isinstance(user, User) and not user.bot and not user.deleted:
-                uid = str(user.id)
-                uname = user.username or ""
-                ah = getattr(user, "access_hash", 0) or 0
-                batch.append((uid, uname, ah))
-                added += 1
-                if len(batch) >= 500:
-                    db_add_targets(batch)
-                    batch = []
+            # 排除：非用户对象 / 机器人 / 已注销(删除) / 无用户名 / 账号自己
+            if not isinstance(user, User):
+                continue
+            if user.bot:
+                skipped["bot"] += 1
+                continue
+            if user.deleted:
+                skipped["deleted"] += 1
+                continue
+            if not user.username:
+                skipped["no_username"] += 1
+                continue
+            if my_id is not None and user.id == my_id:
+                skipped["self"] += 1
+                continue
+            # 开关：只保留近期活跃成员
+            if recent_only_days and not _is_recently_active(user, recent_only_days):
+                skipped["inactive"] += 1
+                continue
+            uid = str(user.id)
+            uname = user.username or ""
+            ah = getattr(user, "access_hash", 0) or 0
+            batch.append((uid, uname, ah))
+            added += 1
+            if len(batch) >= 500:
+                db_add_targets(batch)
+                batch = []
     except Exception as e:
         return f"❌ 拉取成员失败: {e}"
     if batch:
         db_add_targets(batch)
     name = getattr(entity, "title", peer_arg)
     total = db_count_targets()
-    return f"✅ 从「{name}」拉取完成：新增 {added} 人，名单共 {total} 人"
+    # 只显示有效成员；被排除的各类单独说明，便于确认名单干净
+    skip_msg = ""
+    if any(skipped.values()):
+        parts = []
+        if skipped["bot"]:
+            parts.append(f"机器人 {skipped['bot']}")
+        if skipped["deleted"]:
+            parts.append(f"已注销 {skipped['deleted']}")
+        if skipped["no_username"]:
+            parts.append(f"无用户名 {skipped['no_username']}")
+        if skipped["self"]:
+            parts.append(f"账号自己 {skipped['self']}")
+        if skipped["inactive"]:
+            parts.append(f"久未上线 {skipped['inactive']}")
+        skip_msg = f"，已排除（{('、'.join(parts))}）"
+    recent_note = f"（仅保留近{recent_only_days}天活跃）" if recent_only_days else ""
+    return f"✅ 从「{name}」拉取完成：新增有效成员 {added} 人{skip_msg}{recent_note}，名单共 {total} 人"
 
 
 async def collect_channel_history(client, peer_arg, limit=50):

@@ -230,6 +230,20 @@ def db_count_targets():
         DB.putconn(conn)
 
 
+def db_clear_targets():
+    """清空名单（重新拉取前调用，避免旧名单混入）。返回清除条数。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM targets")
+            n = cur.fetchone()[0]
+            cur.execute("DELETE FROM targets")
+        conn.commit()
+        return n
+    finally:
+        DB.putconn(conn)
+
+
 # ---- sent_log（按账号）----
 def db_load_sent(account_no):
     conn = DB.getconn()
