@@ -17,6 +17,7 @@ from config import OWNER_ID, ACTIVE_ACCOUNTS, state, log
 from db import (
     db_count_targets, db_load_targets, db_sent_global, db_get_all_groups,
     db_group_count, db_load_stats, db_clear_targets, db_delete_group,
+    db_clear_cooldown, db_cooldowns,
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
@@ -396,6 +397,15 @@ def register_handlers(bot, accounts):
             await _acc_list(event, accounts)
         elif action == "acc_filter":
             await _run_filter(event, accounts)
+        elif action == "acc_cd_reset":
+            try:
+                n = len(db_cooldowns())
+                db_clear_cooldown()
+                await _reply(event, f"🧊 已重置冷却记账：{n} 个冷却中的账号全部立即解锁。",
+                             buttons=accounts_menu_kb())
+            except Exception as e:
+                log.warning(f"重置冷却失败: {e}")
+                await _reply(event, f"❌ 重置失败：{str(e)[:80]}", buttons=accounts_menu_kb())
         elif action == "profile_menu":
             await _reply(event, profile_menu_text(), buttons=profile_menu_kb())
         elif action == "profile_random":

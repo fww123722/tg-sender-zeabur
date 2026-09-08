@@ -36,6 +36,7 @@ BTN = {
     "acc_add": "添加账号",
     "acc_edit_profile": "批量改资料",
     "acc_filter": "账号过滤",
+    "acc_cd_reset": "🧊 重置冷却",
     # 改资料子菜单
     "profile_random": "🎲 随机小名(蔬果)",
     "profile_name": "✏️ 统一名字(手动输入)",
@@ -88,6 +89,7 @@ BTN_ACTION = {
     BTN["acc_add"]: "acc_add_prompt",
     BTN["acc_edit_profile"]: "profile_menu",
     BTN["acc_filter"]: "acc_filter",
+    BTN["acc_cd_reset"]: "acc_cd_reset",
     BTN["profile_random"]: "profile_random",
     BTN["profile_name"]: "acc_edit_profile_prompt",
     BTN["dashboard_view"]: "dashboard_view",
@@ -250,10 +252,11 @@ def group_del_confirm_kb():
 
 
 def accounts_menu_kb():
-    """账号管理菜单：列表 / 添加 / 改资料 / 过滤"""
+    """账号管理菜单：列表 / 添加 / 改资料 / 过滤 / 重置冷却"""
     return _kb([
         (BTN["acc_list"], BTN["acc_add"]),
         (BTN["acc_edit_profile"], BTN["acc_filter"]),
+        (BTN["acc_cd_reset"],),
         (BTN["back"],),
     ])
 
@@ -339,7 +342,9 @@ def groups_menu_text():
 
 
 def accounts_menu_text():
-    return "👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料。\n💡「账号过滤」检测的是 **Bot 已登录的推送账号**（不是收集来的用户名单）。"
+    return ("👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料。\n"
+            "💡「账号过滤」检测的是 **Bot 已登录的推送账号**（不是收集来的用户名单）。\n"
+            "💡「🧊 重置冷却」清空所有账号的限流冷却记账，让冷却中的账号立即恢复派活。")
 
 
 def profile_menu_text():

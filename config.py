@@ -33,6 +33,8 @@ DAILY_LIMIT = _env_int("DAILY_LIMIT", 100)   # 每个账号每日上限
 BATCH_SLEEP = _env_int("BATCH_SLEEP", 300)
 BATCH_SIZE = _env_int("BATCH_SIZE", 30)
 MAX_FLOOD_WAIT = _env_int("MAX_FLOOD_WAIT", 3600)
+# 撞 430 后该账号冷却时长（秒），冷却期内不再派活；默认 15 分钟，可在 Zeabur 用 COOLDOWN_SEC 覆盖
+COOLDOWN_SEC = _env_int("COOLDOWN_SEC", 900)
 PORT = _env_int("PORT", 8080)
 
 # ============================================================

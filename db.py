@@ -107,6 +107,15 @@ class DB:
                 PRIMARY KEY (source, msg_id)
             )
         """)
+        # 账号冷却表：撞 430/限流后按账号记账，跨批次、跨重启生效
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS account_cooldown (
+                account_no INT PRIMARY KEY,
+                until_at TIMESTAMPTZ NOT NULL,
+                reason TEXT DEFAULT '',
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
 
     @classmethod
     def getconn(cls):
@@ -368,5 +377,69 @@ def db_group_count():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM groups_info")
             return cur.fetchone()[0]
+    finally:
+        DB.putconn(conn)
+
+
+# ---- 账号冷却记账（撞 430 后护号：到点前不参与群发） ----
+def db_mark_cooldown(account_no, seconds, reason=""):
+    """标记账号冷却 seconds 秒。已存在则只延长不缩短（避免刚撞完又被放出来硬撞）。"""
+    try:
+        seconds = int(seconds or 0)
+    except Exception:
+        seconds = 0
+    if seconds <= 0:
+        return
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_cooldown WHERE until_at <= now()")
+            cur.execute("""
+                INSERT INTO account_cooldown (account_no, until_at, reason)
+                VALUES (%s, now() + (%s * interval '1 second'), %s)
+                ON CONFLICT (account_no) DO UPDATE SET
+                    until_at = GREATEST(account_cooldown.until_at,
+                                        now() + (%s * interval '1 second')),
+                    reason = EXCLUDED.reason,
+                    updated_at = now()
+            """, (account_no, seconds, (reason or "")[:200], seconds))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"冷却记账写入失败(不影响群发): {e}")
+    finally:
+        DB.putconn(conn)
+
+
+def db_cooldowns():
+    """返回仍在冷却中的账号 {account_no: {"seconds": 剩余秒, "reason": 原因}}。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT account_no,
+                       GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (until_at - now())))::int),
+                       reason
+                FROM account_cooldown
+            """)
+            rows = cur.fetchall()
+    finally:
+        DB.putconn(conn)
+    return {int(r[0]): {"seconds": int(r[1]), "reason": r[2] or ""}
+            for r in rows if int(r[1]) > 0}
+
+
+def db_clear_cooldown(account_no=None):
+    """清除冷却记账：传 account_no 清单个（发送成功即解除），不传清全部。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            if account_no is None:
+                cur.execute("DELETE FROM account_cooldown")
+            else:
+                cur.execute("DELETE FROM account_cooldown WHERE account_no = %s",
+                            (account_no,))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"冷却记账清除失败: {e}")
     finally:
         DB.putconn(conn)

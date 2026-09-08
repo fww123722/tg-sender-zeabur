@@ -103,6 +103,12 @@ async def check_login_accounts(accounts):
     if not accounts:
         return "⚠️ 当前没有已登录的推送账号。\n点「添加账号」登录后再体检。"
     lines = ["🩺 推送账号体检（Bot 登录账号，非收集名单）", ""]
+    # 冷却记账：上一批撞过 430 的号，这里一并展示还剩多久
+    try:
+        from db import db_cooldowns
+        cooling = db_cooldowns()
+    except Exception:
+        cooling = {}
     ok_n = frozen_n = dead_n = err_n = 0
     for acc_no, client, phone in accounts:
         uname = phone or "?"
@@ -113,7 +119,12 @@ async def check_login_accounts(accounts):
             me = await client.get_me()
             uname = getattr(me, "username", None) or getattr(me, "phone", None) or "?"
             await client.get_dialogs(limit=1)  # 轻量真实探测
-            lines.append(f"  ✅ [账号{acc_no}] @{uname} 正常")
+            cd = cooling.get(acc_no)
+            if cd:
+                lines.append(f"  ⏳ [账号{acc_no}] @{uname} 正常但在冷却中，"
+                             f"剩 {cd['seconds'] // 60} 分钟（{str(cd['reason'])[:40]}）")
+            else:
+                lines.append(f"  ✅ [账号{acc_no}] @{uname} 正常")
             ok_n += 1
         except FloodWaitError as e:
             lines.append(f"  ⏳ [账号{acc_no}] @{uname} 限流：{e.seconds}s 后可用")
@@ -132,4 +143,8 @@ async def check_login_accounts(accounts):
             lines.append(f"  ⚠️ [账号{acc_no}] @{uname} 异常：{type(e).__name__}: {str(e)[:50]}")
             err_n += 1
     lines += ["", "—", f"统计：正常 {ok_n} | 限流 {frozen_n} | 失效 {dead_n} | 异常 {err_n}"]
+    if cooling:
+        detail = "、".join(f"账号{k}剩{v['seconds'] // 60}分钟" for k, v in sorted(cooling.items()))
+        lines.append(f"⏳ 冷却记账中 {len(cooling)} 个：{detail}\n"
+                     "（冷却期内群发自动跳过该账号，到点自动恢复；也可用「🧊 重置冷却」立即解锁）")
     return "\n".join(lines)

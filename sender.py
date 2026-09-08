@@ -7,12 +7,15 @@ import random
 from telethon.errors import FloodWaitError
 from telethon.tl.types import InputPeerUser
 
-from config import BATCH_SIZE, BATCH_SLEEP, MAX_FLOOD_WAIT, log, state
+from config import BATCH_SIZE, BATCH_SLEEP, COOLDOWN_SEC, MAX_FLOOD_WAIT, log, state
 from db import (
     db_add_sent,
     db_bump_sent,
+    db_clear_cooldown,
+    db_cooldowns,
     db_load_sent,
     db_load_stats,
+    db_mark_cooldown,
 )
 
 
@@ -147,6 +150,29 @@ async def _send_one(client, acc_no, uid, info, text, file=None, image=None, back
     return ("ok" if ok else "fail"), (None if ok else err)
 
 
+def _needs_cooldown(err) -> bool:
+    """是否该给账号记冷却：430/慢模式，以及 FloodWait 超过 MAX_FLOOD_WAIT 放弃等待的情况"""
+    e = (err or "").lower()
+    return _is_rate_limited(e) or "flood_wait_too_long" in e
+
+
+def _cooldown_seconds(err) -> int:
+    """冷却时长：FloodWait 给了真实秒数就按它（不超过 COOLDOWN_SEC 的 4 倍），否则用默认"""
+    import re
+    m = re.search(r"flood_wait_too_long:(\d+)s", err or "")
+    if m:
+        return min(int(m.group(1)), COOLDOWN_SEC * 4)
+    return COOLDOWN_SEC
+
+
+def _mark_cooldown(acc_no, err):
+    """撞限流→写冷却记账（跨批次、跨重启生效；DB 故障绝不影响群发）"""
+    try:
+        db_mark_cooldown(acc_no, _cooldown_seconds(err), str(err or "")[:80])
+    except Exception as e:
+        log.warning(f"[账号{acc_no}] 冷却记账失败: {e}")
+
+
 async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None, bot=None):
     """多个账号轮流派发目标，各自控制频率，并发执行。
     群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。
@@ -164,10 +190,29 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             log.warning("汇报消息发送失败")
     uid_list = list(targets.keys())
 
-    # 每个账号分配到的子集：轮流均匀分配
+    # 冷却记账：上一批撞过 430 的号，到点前不参与本轮分配（护号，避免反复硬撞拉长限流窗口）
+    try:
+        cooling = db_cooldowns()
+    except Exception as e:
+        log.warning(f"读取冷却记账失败，按全部可用处理: {e}")
+        cooling = {}
+    avail = [a for a in accounts if a[0] not in cooling]
+    if not avail:
+        # 全在冷却中：不能因此罢工，按原样跑，但在结果里提醒老板
+        cooling_note = f"全部 {len(accounts)} 个账号都在冷却中，仍强制开跑"
+        avail = list(accounts)
+    elif cooling:
+        cooling_note = (f"{len(accounts) - len(avail)} 个账号冷却中，本轮不派活"
+                        f"（剩 {'、'.join(str(cooling[a[0]]['seconds'] // 60) + '分钟' for a in accounts if a[0] in cooling)[:60]}）")
+    else:
+        cooling_note = ""
+    if cooling_note:
+        log.info(f"⏳ 冷却记账：{cooling_note}")
+
+    # 每个账号分配到的子集：轮流均匀分配（只在可用账号间分配）
     per_account = {acc_no: [] for acc_no, *_ in accounts}
     for i, uid in enumerate(uid_list):
-        acc_no = accounts[i % len(accounts)][0]
+        acc_no = avail[i % len(avail)][0]
         per_account[acc_no].append(uid)
 
     # 共享进度（asyncio 单线程，普通 dict 安全）
@@ -232,7 +277,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 continue
             # 同轮内该账号已撞过 430 → 不再硬试（省掉每个目标白等的几十秒），
             # 直接记为限流失败，交给第二轮换号补发
-            if len(accounts) > 1 and acc_no in rate_limited_acc:
+            if len(avail) > 1 and acc_no in rate_limited_acc:
                 progress["done"] += 1
                 progress["fail"] += 1
                 progress["per_acc"][acc_no]["fail"] += 1
@@ -241,7 +286,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 continue
             status, err = await _send_one(client, acc_no, uid, targets.get(uid, {}),
                                           text, file=file, image=image,
-                                          backoff=len(accounts) == 1)
+                                          backoff=len(avail) == 1)
             if status == "skip":
                 progress["skipped"] += 1
                 progress["done"] += 1
@@ -259,8 +304,9 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 progress["fail"] += 1
                 progress["per_acc"][acc_no]["fail"] += 1
                 first_round_fail[uid] = (acc_no, err)
-                if _is_rate_limited(err):
+                if _needs_cooldown(err):
                     rate_limited_acc.add(acc_no)
+                    _mark_cooldown(acc_no, err)
                 log.warning(f"[账号{acc_no}] 发送失败 {uid}: {err}")
             delay = random.uniform(state["min_delay"], state["max_delay"])
             await asyncio.sleep(delay)
@@ -292,7 +338,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
             info = targets.get(uid, {})
             tried = {orig_acc}
-            cands = [accounts[(i + j) % len(accounts)] for j in range(1, len(accounts))]
+            cands = [avail[(i + j) % len(avail)] for j in range(1, len(avail))]
             # 稳定排序：本轮没撞过 430 的账号排前面，已限流的垫后（仍会试，不放过机会）
             cands.sort(key=lambda a: a[0] in rate_limited_acc)
             for acc_no2, client2, _ph2 in cands:
@@ -305,8 +351,9 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                     continue
                 st, err2 = await _send_one(client2, acc_no2, uid, info, text,
                                            file=file, image=image, backoff=False)
-                if st == "fail" and _is_rate_limited(err2):
+                if st == "fail" and _needs_cooldown(err2):
                     rate_limited_acc.add(acc_no2)
+                    _mark_cooldown(acc_no2, err2)
                 if st == "ok":
                     pa = progress["per_acc"].get(orig_acc)
                     if pa and pa["fail"] > 0:
@@ -318,6 +365,12 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                         pa2["sent"] += 1
                     db_add_sent(acc_no2, uid)
                     db_bump_sent(acc_no2)
+                    # 该号实测能发出去 → 解除它身上的冷却（防止误判长期锁死好号）
+                    try:
+                        db_clear_cooldown(acc_no2)
+                        rate_limited_acc.discard(acc_no2)
+                    except Exception:
+                        pass
                     log.info(f"[账号{acc_no2}] 第二轮补发成功 {uid}"
                              f"（原账号{orig_acc} 失败：{str(orig_err)[:40]}）")
                     break
@@ -327,6 +380,14 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     # 老板要求：结果不列每账号明细；总计用全局计数器（per_acc 仍内部维护，供补发回冲）
     summary = (f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
                f"合计：成功 {progress['sent']}，失败 {progress['fail']}，跳过 {progress['skipped']}")
+    extra = []
+    if cooling_note:
+        extra.append(f"⏳ {cooling_note}")
+    if rate_limited_acc:
+        extra.append(f"⏳ 本轮给 {len(rate_limited_acc)} 个限流账号记了冷却"
+                     f"（约 {COOLDOWN_SEC // 60} 分钟），下批自动跳过")
+    if extra:
+        summary += "\n" + "；".join(extra)
     await _report(summary)
     return summary
 
