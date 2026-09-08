@@ -20,9 +20,7 @@ BTN = {
     "report": "🚨 举报",
     # 群发运营子菜单（新版 3 步：选群→文案→确认开跑）
     "camp_step1": "① 选群",
-    "camp_step2": "② 拉取名单",
     "camp_step3": "② 写文案",
-    "camp_step4": "④ 账号准备",
     "camp_start": "③ ✅ 确认开跑",
     "camp_status": "📋 查看进度",
     # 群管理子菜单
@@ -71,9 +69,7 @@ BTN_ACTION = {
     BTN["settings"]: "menu_settings",
     BTN["report"]: "menu_report",
     BTN["camp_step1"]: "camp_step1",
-    BTN["camp_step2"]: "camp_step2",
     BTN["camp_step3"]: "camp_step3",
-    BTN["camp_step4"]: "camp_step4",
     BTN["camp_start"]: "camp_start",
     BTN["camp_status"]: "camp_status",
     BTN["my_groups"]: "my_groups",
@@ -126,7 +122,6 @@ INPUT_HINTS = {
     "set_quota_prompt": "请输入每账号每日上限条数（例如 50）：",
     "set_parallel_prompt": "请输入并行发送的账号数（例如 3）：",
     "camp_step3": "请输入要群发的文案内容（可多行文字）：",
-    "camp_step1": "请发送群链接或群ID：",
     "rep_user_prompt": "请发送要举报的用户/频道用户名或链接（@username 或 t.me/xxx）：",
     "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
 }

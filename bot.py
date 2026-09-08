@@ -4,7 +4,7 @@
 
 成体系交互：
 主菜单 → 群发运营 / 群管理 / 账号管理 / 数据看板 / 系统设置
-群发运营走 5 步向导（选群→拉名单→写文案→账号准备→开跑），每步影响推进顺序。
+群发运营走 3 步（①选群自动拉成员 → ②写文案 → ③确认开跑）。
 进度、选中的群、文案等持久化到 DB（ops_state），下次回来接着继续。
 """
 import asyncio
@@ -352,10 +352,6 @@ def register_handlers(bot, accounts):
             await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(), buttons=campaign_menu_kb())
         elif action == "camp_step1":
             await _campaign_pick_group(event, accounts)
-        elif action == "camp_step2":
-            await _do_step2(event, accounts)
-        elif action == "camp_step4":
-            await _do_step4(event, accounts)
         elif action == "camp_start":
             await _do_start(event, accounts)
         elif action == "pause":
@@ -483,8 +479,6 @@ def register_handlers(bot, accounts):
     def _menu_kb_for_action(action):
         if action in ("camp_step3",):  # 文案输入时保留群发菜单
             return campaign_menu_kb
-        if action == "camp_step1":      # 选群输入保留群发菜单
-            return campaign_menu_kb
         if action == "add_group_prompt" or action == "batch_import_prompt":
             return groups_menu_kb
         if action == "acc_add_prompt":
@@ -507,9 +501,7 @@ def register_handlers(bot, accounts):
         if action == "rep_channel_ai_prompt":
             await _start_report(event, accounts, mode="super", target=text)
             return
-        if action == "camp_step1":
-            await _do_step1(event, accounts, text)
-        elif action == "camp_step3":
+        if action == "camp_step3":
             set_campaign(text=text)
             # 自动检查账号状态
             ready = await _check_accounts_ready(event, accounts)
@@ -691,54 +683,6 @@ def register_handlers(bot, accounts):
         finally:
             state["busy"] = False
 
-    async def _do_step1(event, accounts, text):
-        """① 选择群 → 加群并记录为当前运营群（不立刻拉人）"""
-        if _no_accounts(event):
-            return
-        if state["busy"]:
-            await _reply(event, "⏳ 正在执行加群…")
-            return
-        state["busy"] = True
-        try:
-            await _reply(event, f"🔄 正在加入群组 {text} …")
-            r = await join_group_by_link(accounts[0][1], text)
-            await _reply(event, r)
-            set_campaign(group=text)
-            # 尝试从返回文本里抠标题（简化：直接存原始输入，标题后续用 group id 回填）
-            # 尝试解析群实体存 title / id
-            try:
-                ent = await accounts[0][1].get_entity(text)
-                set_campaign(group_title=getattr(ent, "title", text))
-            except Exception:
-                pass
-            body = campaign_menu_text() + "\n\n" + campaign_text()
-            await _reply(event, body, buttons=campaign_menu_kb())
-        finally:
-            state["busy"] = False
-
-    async def _do_step2(event, accounts):
-        """② 拉名单：从未知目标群拉成员。若已设置运营群且名单为空则拉运营群。"""
-        if _no_accounts(event):
-            return
-        if state["busy"]:
-            await _reply(event, "⏳ 正在执行其他任务")
-            return
-        camp = get_campaign()
-        target = camp.get("group")
-        if not target:
-            await _reply(event, "请先完成「① 选择群」。", buttons=campaign_menu_kb())
-            return
-        state["busy"] = True
-        try:
-            await _reply(event, f"🔄 正在从「{camp.get('group_title') or target}」拉取成员到名单…")
-            r = await collect_members(accounts[0][1], target)
-            await _reply(event, r)
-            set_campaign(target_count=db_count_targets())
-            body = campaign_menu_text() + "\n\n" + campaign_text()
-            await _reply(event, body, buttons=campaign_menu_kb())
-        finally:
-            state["busy"] = False
-
     async def _check_accounts_ready(event, accounts):
         """自动检查账号状态：逐个检测连接+可用性，返回就绪账号列表（并实时报告）。"""
         ready = []
@@ -759,21 +703,8 @@ def register_handlers(bot, accounts):
         await _reply(event, "\n".join(lines))
         return ready
 
-    async def _do_step4(event, accounts):
-        """④ 账号准备：显示账号在线数 & 名单下发前是否满足基本条件。"""
-        if not accounts:
-            await _reply(event, "⚠️ 没有在线账号，请先「添加账号」。", buttons=campaign_menu_kb())
-            return
-        set_campaign(accounts_ready=True)
-        body = (
-            f"✅ 账号就绪：{len(accounts)} 个在线可用。\n\n"
-            "开始群发时会自动轮换分配目标。\n\n"
-            + campaign_text()
-        )
-        await _reply(event, body, buttons=campaign_menu_kb())
-
     async def _do_start(event, accounts):
-        """⑤ 开始群发：必须群+名单+文案齐全才放行。"""
+        """③ 确认开跑：必须群+名单+文案齐全才放行。"""
         if _no_accounts(event):
             return
         if state["busy"]:
@@ -781,15 +712,15 @@ def register_handlers(bot, accounts):
             return
         camp = get_campaign()
         if not camp.get("group"):
-            await _reply(event, "❌ 还没选群。请先「① 选择群」。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 还没选群。请先点「① 选群」。", buttons=campaign_menu_kb())
             return
         text = camp.get("text")
         if not text:
-            await _reply(event, "❌ 还没写文案。请先「③ 写文案」。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 还没写文案。请点「② 写文案」后直接发文案。", buttons=campaign_menu_kb())
             return
         targets = db_load_targets()
         if not targets:
-            await _reply(event, "❌ 名单为空。请先「② 拉取名单」。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 名单为空（可能该群没有可拉的有效成员）。请重新点「① 选群」拉一次。", buttons=campaign_menu_kb())
             return
         _start_send_campaign(event, accounts, text)
 

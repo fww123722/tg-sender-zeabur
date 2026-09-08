@@ -76,10 +76,10 @@ def clear_campaign():
 
 
 def campaign_text() -> str:
-    """生成群发运营向导的当前进度文本"""
+    """生成群发运营的当前进度文本（新版 3 步：选群→文案→开跑）。"""
     c = get_campaign()
     if not c:
-        return "尚未开始群发运营，点「🚀 开始群发」从第①步走起。"
+        return "尚未开始。点「① 选群」选群（自动拉成员）→ 发文案 → 「③ 确认开跑」。"
     lines = ["【群发运营】当前进度："]
     checks = {
         "group": bool(c.get("group")),
@@ -88,13 +88,15 @@ def campaign_text() -> str:
         "accounts": bool(c.get("accounts_ready")),
     }
     steps = [
-        ("① 选择群", "group"),
-        ("② 拉取名单", "target"),
-        ("③ 写文案", "text"),
-        ("④ 账号就绪", "accounts"),
+        ("① 选群（自动拉成员）", "group"),
+        ("② 写文案", "text"),
+        ("③ 确认开跑", None),
     ]
     done = 0
     for label, key in steps:
+        if key is None:
+            lines.append("  ⬜ " + label)
+            continue
         ok = checks.get(key, False)
         if ok:
             done += 1
@@ -102,5 +104,8 @@ def campaign_text() -> str:
     lines.append(f"  当前: 群={c.get('group_title') or c.get('group')} | "
                  f"名单={c.get('target_count', 0)}人 | "
                  f"文案={'已填' if c.get('text') else '未填'}")
-    lines.append(f"→ 已完成 {done}/4 步")
+    if checks.get("group") and checks.get("text"):
+        lines.append("→ 就绪，点「③ ✅ 确认开跑」开始群发")
+    else:
+        lines.append(f"→ 已完成 {done}/2 步")
     return "\n".join(lines)
