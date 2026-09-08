@@ -890,6 +890,10 @@ def register_handlers(bot, accounts):
         try:
             r = await join_group_by_link(accounts[0][1], text)
             await _reply(event, r)
+            if not r.startswith("✅"):
+                if r.startswith("⏳"):
+                    await _reply(event, "群主批准后再点一次「加群」发同一链接，即可入表+拉名单。", buttons=groups_menu_kb())
+                return
             await _reply(event, "正在读取群成员到名单…")
             r2 = await collect_members(accounts[0][1], text)
             await _reply(event, r2, buttons=groups_menu_kb())

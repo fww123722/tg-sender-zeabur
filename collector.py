@@ -100,7 +100,20 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     try:
         entity = await _resolve_entity(client, peer_arg)
     except Exception as e:
-        return f"❌ 找不到该群/频道: {e}\n💡 提示：如果是刚进的群，先在账号管理里同步一次对话，或用群链接（@用户名 / t.me/xxx）重试。"
+        estr = str(e)
+        low = estr.lower()
+        # 邀请链接失效/无效单独提示（这类不是实体缓存问题，重试无用）
+        if "expired" in low or "not valid anymore" in low or "INVITE_HASH_EXPIRED" in estr:
+            return ("❌ 邀请链接已过期失效（Telegram 报 INVITE_HASH_EXPIRED），这个链接用不了了。\n"
+                    "💡 解释：群主重置过邀请链接 / 链接设了有效期或次数上限 / 群升级成超级群后旧 joinchat 链接全部作废。\n"
+                    "✔ 正确做法：\n"
+                    "  · 找群主重新要一条 t.me/+xxxx 邀请链接，用「加群」加入\n"
+                    "  · 若账号本来已在群里：改用群名称里的数字 ID、或 t.me/群用户名，不要发邀请链接")
+        if "USERNAME_NOT_OCCUPIED" in estr or "Could not find the input entity" in estr:
+            return (f"❌ 找不到该群/频道: {estr}\n"
+                    f"💡 提示：请确认链接形式正确（公开群用 t.me/用户名，纯数字 ID 仅适用于账号已在的群）。\n"
+                    f"     若是刚进的群，先到「👥 账号管理 → 账号列表」同步一次对话后重试。")
+        return f"❌ 找不到该群/频道: {estr}\n💡 提示：如果是刚进的群，先在账号管理里同步一次对话，或用群链接（@用户名 / t.me/xxx）重试。"
     # 取本账号 id，用于排除“账号自己”
     try:
         me = await client.get_me()
