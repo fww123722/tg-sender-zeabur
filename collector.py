@@ -230,6 +230,37 @@ async def list_my_groups(client=None):
     return "\n".join(result)
 
 
+async def diag_groups(accounts):
+    """诊断：逐账号列出真实群/频道对话，并与 groups_info 表对账。
+    accounts 为 (acc_no, client, phone) 列表。"""
+    rows = db_get_all_groups()
+    table_ids = {int(g[0]) for g in rows}
+    table_titles = {int(g[0]): (g[1] or "(无标题)") for g in rows}
+    out = [f"📋 groups_info 表共 {len(rows)} 个群："]
+    for gid, title, username, mc, _c in rows:
+        out.append(f"  · id={gid} 「{title or '(无标题)'}」@({username or '-'}) 成员:{mc or '?'}")
+    found_ids = set()
+    for acc_no, client, _ph in accounts:
+        try:
+            dialogs = await client.get_dialogs()
+        except Exception as e:
+            out.append(f"\n[账号{acc_no}] ❌ 拉对话失败: {str(e)[:60]}")
+            continue
+        gs = [d for d in dialogs if getattr(d.entity, "title", None) is not None]
+        out.append(f"\n[账号{acc_no}] 真实群/频道 {len(gs)} 个：")
+        for d in gs[:50]:
+            mark = "✅在表" if abs(d.id) in table_ids or d.id in table_ids else "❌不在表"
+            if abs(d.id) in table_ids or d.id in table_ids:
+                found_ids.add(abs(d.id))
+            out.append(f"  · id={d.id} 「{d.title}」 {mark}")
+    missing = table_ids - found_ids
+    if missing:
+        out.append("\n⚠️ 表里有但没有任何账号在群里的僵尸记录：")
+        for gid in missing:
+            out.append(f"  · id={gid} 「{table_titles.get(gid, '?')}」 ← 需重新加群或删除")
+    return "\n".join(out)
+
+
 async def _save_group_info(client, entity):
     """保存群组信息到数据库，并返回 (title, member_count)。"""
     title = getattr(entity, "title", "") or ""

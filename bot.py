@@ -20,7 +20,7 @@ from db import (
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
-    collect_channel_history,
+    collect_channel_history, diag_groups,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
@@ -141,6 +141,26 @@ def register_handlers(bot, accounts):
         if event.sender_id != OWNER_ID or _no_accounts(event):
             return
         await _reply(event, await list_my_groups(accounts[0][1]), buttons=groups_menu_kb())
+
+    @bot.on(events.NewMessage(pattern="^/diag$"))
+    async def on_diag(event):
+        """诊断：对账 groups_info 表 与 各账号真实群列表，找出僵尸群记录。"""
+        if event.sender_id != OWNER_ID or _no_accounts(event):
+            return
+        if state["busy"]:
+            await _reply(event, "⏳ 正在执行其他任务")
+            return
+        state["busy"] = True
+        try:
+            await _reply(event, "🔬 正在诊断：拉取各账号真实群列表并与表对账…")
+            r = await diag_groups(accounts)
+            # 过长时分条发送
+            for i in range(0, len(r), 3500):
+                await _reply(event, r[i:i + 3500])
+        except Exception as e:
+            await _reply(event, f"❌ 诊断失败: {e}")
+        finally:
+            state["busy"] = False
 
     @bot.on(events.NewMessage(pattern=r"^/collect ([\s\S]+)$"))
     async def on_collect(event):
