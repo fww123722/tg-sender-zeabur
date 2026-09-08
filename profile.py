@@ -5,7 +5,7 @@
 两种用法：
 1) Bot 交互（推荐）：直接传 name / bio / username_mode，不依赖任何文件。
    username_mode: "skip" 不改 | "random" 每账号生成随机可用用户名 | 其他字符串=统一用户名
-   random_names=True 时每账号随机中文姓名（姓固定「小」，名随机）；
+   random_names=True 时每账号随机中文小名（姓固定「小」+ 水果/蔬菜名）；
    random_avatar=True 时每账号随机真实风景图头像，但**已有头像的账号自动跳过不换**
 2) 文件模式（兼容 qfbot Win 端「配置」目录）：名字.txt / 姓氏.txt / 用户名.txt / 简介.txt / 头像*.jpg
 
@@ -47,28 +47,29 @@ _LANDSCAPE_URLS = [
 ]
 
 
-# 随机中文姓名池：姓固定「小」，名字随机 1-2 字（只用常用字，避开生僻/歧义）
+# 随机中文小名池：姓固定「小」+ 水果/蔬菜名（亲切好记，像真人随手起的名）
 _SURNAME = "小"
-_CN_CHARS = (
-    "伟芳娜敏静丽强磊军洋勇艳杰娟涛明超秀兰霞平刚桂英华春晓燕红玲飞金钢辉"
-    "建国淑彬东宁福生龙诚志佳新云莲真环孔苏薇宇浩凯仁德宜乐莉青斌梁洁"
-    "怡佩惠美玉婷秋林有成延羲阳雪松波瑞兴荣文礼智信义利海涵菁萌言梦秦曹"
-)
-# 去重并只保留汉字，防止混入非中文字符生成怪名
-_CN_CHARS = "".join(dict.fromkeys(ch for ch in _CN_CHARS if "\u4e00" <= ch <= "\u9fff"))
-_CN_GIVEN_1 = list(_CN_CHARS)
-_CN_GIVEN_2 = [
-    "小明", "小刚", "志远", "建国", "秀英", "桂兰", "晓燕", "雅静", "雨萱", "梓涵",
-    "思远", "浩然", "子涵", "欣怡", "佳琪", "嘉懿", "明辉", "文轩", "锦程", "若溪",
-    "一诺", "亦辰", "沐阳", "泽宇", "睿渊", "俊驰", "英杰", "天佑", "博文", "鑫磊",
+
+# 蔬菜
+_VEGETABLES = [
+    "白菜", "萝卜", "土豆", "番茄", "黄瓜", "茄子", "南瓜", "冬瓜", "丝瓜", "苦瓜",
+    "辣椒", "芹菜", "香菜", "菠菜", "生菜", "韭菜", "木耳", "香菇", "花生", "毛豆",
+    "豌豆", "玉米", "山药", "莲藕", "春笋", "豆芽", "青椒", "西蓝花", "包菜", "芥蓝",
 ]
+# 水果
+_FRUITS = [
+    "西瓜", "苹果", "橙子", "橘子", "香蕉", "葡萄", "草莓", "蓝莓", "芒果", "桃子",
+    "李子", "樱桃", "柚子", "榴莲", "荔枝", "龙眼", "菠萝", "山竹", "杨桃", "石榴",
+    "柿子", "椰子", "哈密瓜", "香瓜", "木瓜", "猕猴桃", "无花果", "杨梅", "桑葚", "柠檬",
+]
+_CN_GIVEN = _VEGETABLES + _FRUITS
 
 
 def gen_cn_name():
-    """随机中文姓名：姓固定「小」，名随机 1 或 2 字。
-    整名放 first_name，last_name 返回空串（必须清空，否则旧姓氏会残留成「小明 Smith」）。"""
-    given = random.choice(_CN_GIVEN_2) if random.random() < 0.6 else random.choice(_CN_GIVEN_1)
-    return _SURNAME + given, ""
+    """随机中文小名：姓固定「小」，名取自水果/蔬菜池。
+    返回 (first_name, last_name)：整名放 first_name，last_name 返回空串
+    （必须清空，否则旧姓氏会残留变成「小苹果 Smith」）。"""
+    return _SURNAME + random.choice(_CN_GIVEN), ""
 
 
 async def has_avatar(client):
@@ -261,7 +262,7 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
       bio           统一简介（None=不改，""或"删除"=清空）
       username_mode "skip"不改 / "random"每账号随机生成 / 其他字符串=统一设置
       avatar        头像文件路径（None=不改）
-      random_names  True=每账号随机中文姓名（姓「小」+随机名，覆盖 name/last_name）
+      random_names  True=每账号随机中文小名（姓「小」+水果/蔬菜，覆盖 name/last_name）
       random_avatar True=每账号下载随机真实风景图作头像；已有头像的账号跳过不换
     """
     if not ACTIVE_ACCOUNTS:
@@ -312,7 +313,7 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
     results = []
     if has_edit:
         results.append(f"📝 待改账号 {len(ACTIVE_ACCOUNTS)} 个 | "
-                       f"名字={'随机中文姓名(小+随机)' if random_names else (profile.get('first_name') or '(不改)')} | "
+                       f"名字={'随机小名(小+蔬果)' if random_names else (profile.get('first_name') or '(不改)')} | "
                        f"用户名={'随机生成' if profile['_username_mode'] == 'random' else (profile['_username_mode'] or '不改')}")
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
             p = dict(profile)
