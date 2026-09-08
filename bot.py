@@ -584,8 +584,15 @@ def register_handlers(bot, accounts):
                 f"✅ 已选群「{title or target}」\n"
                 f"🧹 已清空旧名单（{cleared} 人）\n"
                 f"🔄 正在拉取成员到名单…")
-            r = await collect_members(accounts[0][1], target,
-                                     recent_only_days=state.get("recent_only_days", 0))
+            r = None
+            for acc_no, client, _ph in accounts:
+                r = await collect_members(client, target,
+                                         recent_only_days=state.get("recent_only_days", 0))
+                if not r.startswith("❌"):
+                    break
+                # 该账号找不到群，换下一个账号
+            if r is None:
+                r = "❌ 没有可用账号，无法拉取"
             await _reply(event, r)
             set_campaign(group=target, group_title=title or target,
                          target_count=db_count_targets())

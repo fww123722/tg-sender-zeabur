@@ -48,12 +48,35 @@ from config import log
 from db import db_add_targets, db_count_targets, db_add_group, db_get_all_groups
 
 
+async def _resolve_entity(client, peer_arg):
+    """解析群实体。纯数字 ID 在 session 无缓存时会查不到，先扫对话列表建立缓存再重试。"""
+    try:
+        return await client.get_entity(peer_arg), None
+    except Exception as first_err:
+        # 仅对纯数字 ID/带-100前缀的情况做对话扫描回退
+        s = str(peer_arg).strip()
+        if not re.fullmatch(r"-?\d+", s):
+            raise first_err
+        try:
+            target_id = int(s)
+        except ValueError:
+            raise first_err
+        # 扫描对话列表：既能命中实体，也顺带把实体写进 session 缓存
+        # 兼容三种形态：原始 id、负数 id、BotAPI 风格 -100 前缀 id
+        raw = int(s[4:]) if s.startswith("-100") else abs(target_id)
+        candidates = {target_id, raw, int(f"-100{raw}")}
+        async for dialog in client.iter_dialogs(limit=200):
+            if dialog.id in candidates:
+                return dialog.entity, None
+        raise first_err
+
+
 async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     """从群/频道拉取成员并加入名单。"""
     try:
-        entity = await client.get_entity(peer_arg)
+        entity = await _resolve_entity(client, peer_arg)
     except Exception as e:
-        return f"❌ 找不到该群/频道: {e}"
+        return f"❌ 找不到该群/频道: {e}\n💡 提示：如果是刚进的群，先在账号管理里同步一次对话，或用群链接（@用户名 / t.me/xxx）重试。"
     # 取本账号 id，用于排除“账号自己”
     try:
         me = await client.get_me()
