@@ -61,12 +61,18 @@ async def _resolve_entity(client, peer_arg):
             target_id = int(s)
         except ValueError:
             raise first_err
-        # 扫描对话列表：既能命中实体，也顺带把实体写进 session 缓存
-        # 兼容三种形态：原始 id、负数 id、BotAPI 风格 -100 前缀 id
+        # 扫描对话列表：既能命中实体，也顺带把实体写入 session 缓存
         raw = int(s[4:]) if s.startswith("-100") else abs(target_id)
-        candidates = {target_id, raw, int(f"-100{raw}")}
+        # 先按 peer 类型直接试（session 有缓存时一步到位）
+        from telethon.tl.types import PeerChannel, PeerChat
+        for peer in (PeerChannel(raw), PeerChat(raw)):
+            try:
+                return await client.get_entity(peer), None
+            except Exception:
+                pass
+        # 兕底：扫对话按绝对值匹配，兼容原始/-负数(basic群)/-100前缀(频道) 三种形态
         async for dialog in client.iter_dialogs(limit=200):
-            if dialog.id in candidates:
+            if abs(dialog.id) == raw:
                 return dialog.entity, None
         raise first_err
 

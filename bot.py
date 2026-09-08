@@ -594,6 +594,8 @@ def register_handlers(bot, accounts):
             if r is None:
                 r = "❌ 没有可用账号，无法拉取"
             await _reply(event, r)
+            if r.startswith("❌"):
+                return  # 拉取失败，不进入文案环节
             set_campaign(group=target, group_title=title or target,
                          target_count=db_count_targets())
             await _reply(event,
