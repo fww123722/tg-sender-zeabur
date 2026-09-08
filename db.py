@@ -350,6 +350,18 @@ def db_get_all_groups():
         DB.putconn(conn)
 
 
+def db_delete_group(gid):
+    """从 groups_info 表删除指定群记录，返回是否删到。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM groups_info WHERE group_id = %s", (int(gid),))
+            conn.commit()
+            return cur.rowcount > 0
+    finally:
+        DB.putconn(conn)
+
+
 def db_group_count():
     conn = DB.getconn()
     try:

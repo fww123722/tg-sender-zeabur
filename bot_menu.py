@@ -29,6 +29,7 @@ BTN = {
     "my_groups": "我的群",
     "add_group": "加群",
     "batch_import": "批量导入",
+    "del_group": "🗑 删除群",
     # 账号管理子菜单
     "acc_list": "账号列表",
     "acc_add": "添加账号",
@@ -77,6 +78,7 @@ BTN_ACTION = {
     BTN["my_groups"]: "my_groups",
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
+    BTN["del_group"]: "del_group_menu",
     BTN["acc_list"]: "acc_list",
     BTN["acc_add"]: "acc_add_prompt",
     BTN["acc_edit_profile"]: "acc_edit_profile_prompt",
@@ -172,12 +174,22 @@ def group_pick_kb(groups):
 
 
 def groups_menu_kb():
-    """群管理菜单：我的群 / 加群 / 批量导入 / 返回"""
+    """群管理菜单：我的群 / 加群 / 批量导入 / 删除群 / 返回"""
     return _kb([
         (BTN["my_groups"], BTN["add_group"]),
-        (BTN["batch_import"],),
+        (BTN["batch_import"], BTN["del_group"]),
         (BTN["back"],),
     ])
+
+
+def group_del_kb(groups):
+    """删除群键盘：单列 🗑 序号·标题。groups: db_get_all_groups() 返回的行。"""
+    rows = []
+    for i, g in enumerate(groups, 1):
+        title = (g[1] or g[2] or str(g[0]))[:24]
+        rows.append((f"🗑 {i}·{title}",))
+    rows.append((BTN["back_groups"],))
+    return _kb(rows)
 
 
 def accounts_menu_kb():
@@ -256,7 +268,7 @@ def campaign_menu_text():
 
 
 def groups_menu_text():
-    return "📥 群管理\n\n查看已加入的群、添加新群、批量导入群链接。"
+    return "📥 群管理\n\n查看已加入的群、添加新群、批量导入群链接、删除群记录。\n💡 删除群只移除 Bot 里的记录，不会退出 Telegram 群。"
 
 
 def accounts_menu_text():
