@@ -398,6 +398,30 @@ async def _peek_invite_title(client, invite_hash):
     return getattr(chat, "title", None) or getattr(check, "title", None)
 
 
+async def _probe_chat_state(client, title_hint=None, gid_hint=None):
+    """查本账号在这个群里的状态（只读，不发消息）。
+    用于定性 InviteHashExpired：被踢/被封的账号 Telegram 也会回'链接过期'。"""
+    t = (title_hint or "").strip().lower()
+    try:
+        async for d in client.iter_dialogs(limit=400):
+            ent = getattr(d, "entity", None)
+            name = (getattr(ent, "title", "") or "").strip().lower()
+            if not name or (t and name != t):
+                continue
+            flags = [f for f in ("kicked", "left", "creator", "megagroup", "broadcast",
+                                 "unavailable", "gigagroup", "restricted")
+                     if getattr(ent, f, False)]
+            banned = getattr(ent, "banned_by", None) is not None
+            call = getattr(d, "conversation", None)
+            info = "kicked/left/flags: " + (",".join(flags) if flags else "无")
+            if banned:
+                info += " +被群封禁(banned_by)"
+            return info
+        return "对话列表里找不到该群（未加入、且无本地记录）"
+    except Exception as e:
+        return f"查询失败 {type(e).__name__}: {e}"
+
+
 async def join_group_all_accounts(accounts, link):
     """逐账号尝试加群，谁加得上用谁；全失败时列出每个账号的错。
     用途：区分「链接/群侧失效（两账号同错）」还是「单账号被限制（错不同）。"""
@@ -416,12 +440,16 @@ async def join_group_all_accounts(accounts, link):
             failed = [(t, m) for t, m, _, _ in lines[:-1]]
             note = ""
             if failed:
-                det = "；".join(f"{t} → {m[:36]}" for t, m in failed)
-                note = (f"\n⚠️ 未能加入的账号：{det}\n"
+                seg = []
+                for (t, m), (_tag, _c, _ph) in zip(failed, accounts):
+                    st = await _probe_chat_state(_c, getattr(ent, "title", None))
+                    seg.append(f"{t}（当前状态：{st}）")
+                    break  # 只报第一个失败账号，避免刷屏
+                note = (f"\n⚠️ 未能加入的账号：{'；'.join(seg)}\n"
                         f"   同一链接其他账号能加 → 不是链接问题，是该账号单独被拒：\n"
-                        f"   · 最常见：该号被这个群封禁/曾在群里被踢（Telegram 对被封号一律报链接过期）\n"
-                        f"   · 其次：该号被 Telegram 限制加群（找 @SpamBot 查限制）\n"
-                        f"   ✔ 解法：群主到「群设置 → 管理员 → 被封禁的成员」里把它解除，再重发链接。")
+                        f"   · 状态含 kicked/left/被封禁 → 该号被这个群踢过或封了，"
+                        f"请群主在「群设置 → 管理员 → 被封禁的成员」里解除后重发链接\n"
+                        f"   · 状态正常却仍被拒 → 该号被 Telegram 限制加群（找 @SpamBot 查）\n")
             return (f"{txt}\n📝 使用账号：{tag}{note}", ent, client)
         if idx < len(accounts) - 1:
             await asyncio.sleep(1.2)
