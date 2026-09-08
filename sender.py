@@ -96,7 +96,7 @@ def _is_rate_limited(err) -> bool:
     )
 
 
-async def _send_one(client, acc_no, uid, info, text, file=None, image=None):
+async def _send_one(client, acc_no, uid, info, text, file=None, image=None, backoff=False):
     """用指定账号给单个目标发一条：实体三级解析 + 限流退避重试 + access_hash 失效兜底。
     返回 (status, err)，status ∈ "ok"/"fail"/"skip"（skip=实体压根解析不出来，不算发送失败）。"""
     uname = (info.get("username") or "").strip().lstrip("@")
@@ -124,13 +124,16 @@ async def _send_one(client, acc_no, uid, info, text, file=None, image=None):
             log.warning(f"[账号{acc_no}] 跳过 {uid}: {e}")
             return "skip", str(e)
     ok, err = await safe_send_media(client, entity, text, file=file, image=image)
-    # ④ 限流（430 Too many requests / 慢模式）：退避后重试，别直接判失败
-    for _w in (8, 25):
-        if ok or not _is_rate_limited(err):
-            break
-        log.info(f"[账号{acc_no}] 限流等待 {_w}s 后重试 {uid}（{str(err)[:40]}）")
-        await asyncio.sleep(_w)
-        ok, err = await safe_send_media(client, entity, text, file=file, image=image)
+    # ④ 限流（430）是**账号级**的：同一个号退避重发实测几乎必败（白等 33s/目标），
+    # 正确解法是立即换其他账号（send_to_list_multi 第二轮补发）。
+    # backoff=True 仅用于全局只剩 1 个账号、没号可换的场景。
+    if backoff:
+        for _w in (8, 25):
+            if ok or not _is_rate_limited(err):
+                break
+            log.info(f"[账号{acc_no}] 限流等待 {_w}s 后重试 {uid}（{str(err)[:40]}）")
+            await asyncio.sleep(_w)
+            ok, err = await safe_send_media(client, entity, text, file=file, image=image)
     # ⑤ access_hash 失效/实体不可达兜底：换一种解析方式再试一次
     if not ok and _is_bad_peer(err):
         try:
@@ -178,6 +181,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     }
     # 第一轮发送失败的目标：{uid: (acc_no, err)}，供第二轮换账号补发判断
     first_round_fail = {}
+    # 本轮已撞过 430 的账号：430 是账号级限流，同轮内不再拿它硬试剩余目标
+    rate_limited_acc = set()
 
     async def progress_reporter():
         """后台协程：每 15 秒向 owner 汇总推送一次进度"""
@@ -225,8 +230,18 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 progress["skipped"] += 1
                 progress["done"] += 1
                 continue
+            # 同轮内该账号已撞过 430 → 不再硬试（省掉每个目标白等的几十秒），
+            # 直接记为限流失败，交给第二轮换号补发
+            if len(accounts) > 1 and acc_no in rate_limited_acc:
+                progress["done"] += 1
+                progress["fail"] += 1
+                progress["per_acc"][acc_no]["fail"] += 1
+                first_round_fail[uid] = (acc_no, "Too many requests (账号本轮已限流，跳过未试)")
+                log.info(f"[账号{acc_no}] 本轮已限流，{uid} 直接转第二轮补发")
+                continue
             status, err = await _send_one(client, acc_no, uid, targets.get(uid, {}),
-                                          text, file=file, image=image)
+                                          text, file=file, image=image,
+                                          backoff=len(accounts) == 1)
             if status == "skip":
                 progress["skipped"] += 1
                 progress["done"] += 1
@@ -244,6 +259,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 progress["fail"] += 1
                 progress["per_acc"][acc_no]["fail"] += 1
                 first_round_fail[uid] = (acc_no, err)
+                if _is_rate_limited(err):
+                    rate_limited_acc.add(acc_no)
                 log.warning(f"[账号{acc_no}] 发送失败 {uid}: {err}")
             delay = random.uniform(state["min_delay"], state["max_delay"])
             await asyncio.sleep(delay)
@@ -275,17 +292,21 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
             info = targets.get(uid, {})
             tried = {orig_acc}
-            for j in range(1, len(accounts)):
+            cands = [accounts[(i + j) % len(accounts)] for j in range(1, len(accounts))]
+            # 稳定排序：本轮没撞过 430 的账号排前面，已限流的垫后（仍会试，不放过机会）
+            cands.sort(key=lambda a: a[0] in rate_limited_acc)
+            for acc_no2, client2, _ph2 in cands:
                 if state["stop"]:
                     break
-                acc_no2, client2, _ph2 = accounts[(i + j) % len(accounts)]
                 if acc_no2 in tried:
                     continue
                 tried.add(acc_no2)
                 if uid in db_load_sent(acc_no2):
                     continue
                 st, err2 = await _send_one(client2, acc_no2, uid, info, text,
-                                           file=file, image=image)
+                                           file=file, image=image, backoff=False)
+                if st == "fail" and _is_rate_limited(err2):
+                    rate_limited_acc.add(acc_no2)
                 if st == "ok":
                     pa = progress["per_acc"].get(orig_acc)
                     if pa and pa["fail"] > 0:
