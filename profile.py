@@ -5,7 +5,8 @@
 两种用法：
 1) Bot 交互（推荐）：直接传 name / bio / username_mode，不依赖任何文件。
    username_mode: "skip" 不改 | "random" 每账号生成随机可用用户名 | 其他字符串=统一用户名
-   random_names=True 时每账号随机英文姓名；random_avatar=True 时每账号随机真实风景图头像
+   random_names=True 时每账号随机中文姓名（姓固定「小」，名随机）；
+   random_avatar=True 时每账号随机真实风景图头像，但**已有头像的账号自动跳过不换**
 2) 文件模式（兼容 qfbot Win 端「配置」目录）：名字.txt / 姓氏.txt / 用户名.txt / 简介.txt / 头像*.jpg
 
 Telegram 用户名规则：5-32 位，字母/数字/下划线，必须字母开头，不能下划线结尾，全局唯一。
@@ -39,20 +40,6 @@ from config import ACTIVE_ACCOUNTS, DATA_DIR, log
 _U_FIRST = string.ascii_lowercase
 _U_REST = string.ascii_lowercase + string.digits
 
-# 随机英文姓名池（常见英文名，自然不突兀）
-FIRST_NAMES = [
-    "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Thomas", "Chris",
-    "Daniel", "Matthew", "Anthony", "Mark", "Steven", "Andrew", "Joshua", "Kevin", "Brian", "Edward",
-    "Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia", "Charlotte", "Amelia", "Harper", "Evelyn",
-    "Abigail", "Emily", "Elizabeth", "Sofia", "Madison", "Avery", "Ella", "Grace", "Chloe", "Victoria",
-]
-LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
-    "Anderson", "Taylor", "Thomas", "Moore", "Jackson", "Martin", "Lee", "Thompson", "White", "Harris",
-    "Clark", "Lewis", "Walker", "Hall", "Allen", "Young", "King", "Wright", "Scott", "Green",
-    "Baker", "Adams", "Nelson", "Carter", "Mitchell", "Turner", "Phillips", "Campbell", "Parker", "Bennett",
-]
-
 # 风景图下载源：真实 Flickr 风景照优先，picsum 随机实拍图兜底
 _LANDSCAPE_URLS = [
     "https://loremflickr.com/640/640/landscape,nature,mountain,sea,forest?random={}",
@@ -60,9 +47,42 @@ _LANDSCAPE_URLS = [
 ]
 
 
-def gen_en_name():
-    """随机英文姓名，返回 (first_name, last_name)。"""
-    return random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
+# 随机中文姓名池：姓固定「小」，名字随机 1-2 字（只用常用字，避开生僻/歧义）
+_SURNAME = "小"
+_CN_CHARS = (
+    "伟芳娜敏静丽强磊军洋勇艳杰娟涛明超秀兰霞平刚桂英华春晓燕红玲飞金钢辉"
+    "建国淑彬东宁福生龙诚志佳新云莲真环孔苏薇宇浩凯仁德宜乐莉青斌梁洁"
+    "怡佩惠美玉婷秋林有成延羲阳雪松波瑞兴荣文礼智信义利海涵菁萌言梦秦曹"
+)
+# 去重并只保留汉字，防止混入非中文字符生成怪名
+_CN_CHARS = "".join(dict.fromkeys(ch for ch in _CN_CHARS if "\u4e00" <= ch <= "\u9fff"))
+_CN_GIVEN_1 = list(_CN_CHARS)
+_CN_GIVEN_2 = [
+    "小明", "小刚", "志远", "建国", "秀英", "桂兰", "晓燕", "雅静", "雨萱", "梓涵",
+    "思远", "浩然", "子涵", "欣怡", "佳琪", "嘉懿", "明辉", "文轩", "锦程", "若溪",
+    "一诺", "亦辰", "沐阳", "泽宇", "睿渊", "俊驰", "英杰", "天佑", "博文", "鑫磊",
+]
+
+
+def gen_cn_name():
+    """随机中文姓名：姓固定「小」，名随机 1 或 2 字。
+    整名放 first_name，last_name 返回空串（必须清空，否则旧姓氏会残留成「小明 Smith」）。"""
+    given = random.choice(_CN_GIVEN_2) if random.random() < 0.6 else random.choice(_CN_GIVEN_1)
+    return _SURNAME + given, ""
+
+
+async def has_avatar(client):
+    """判断该账号是否已有头像：只看 get_me().photo，不多发请求。
+    UserProfilePhoto=有头像；None / UserProfilePhotoEmpty=没有。"""
+    try:
+        me = await client.get_me()
+        ph = getattr(me, "photo", None)
+        if ph is None or type(ph).__name__.endswith("Empty"):
+            return False
+        return True
+    except Exception as e:
+        log.warning(f"头像检查失败（按无头像处理）: {e}")
+        return False
 
 
 def fetch_random_landscape(save_dir, tag):
@@ -241,8 +261,8 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
       bio           统一简介（None=不改，""或"删除"=清空）
       username_mode "skip"不改 / "random"每账号随机生成 / 其他字符串=统一设置
       avatar        头像文件路径（None=不改）
-      random_names  True=每账号随机英文姓名（覆盖 name/last_name）
-      random_avatar True=每账号下载一张随机真实风景图作头像
+      random_names  True=每账号随机中文姓名（姓「小」+随机名，覆盖 name/last_name）
+      random_avatar True=每账号下载随机真实风景图作头像；已有头像的账号跳过不换
     """
     if not ACTIVE_ACCOUNTS:
         return "❌ 当前没有可用账号"
@@ -292,19 +312,22 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
     results = []
     if has_edit:
         results.append(f"📝 待改账号 {len(ACTIVE_ACCOUNTS)} 个 | "
-                       f"名字={'随机英文姓名' if random_names else (profile.get('first_name') or '(不改)')} | "
+                       f"名字={'随机中文姓名(小+随机)' if random_names else (profile.get('first_name') or '(不改)')} | "
                        f"用户名={'随机生成' if profile['_username_mode'] == 'random' else (profile['_username_mode'] or '不改')}")
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
             p = dict(profile)
             if random_names:
-                fn, ln = gen_en_name()
+                fn, ln = gen_cn_name()
                 p["first_name"] = fn
                 p["last_name"] = ln
             results.append(await _apply_profile(client, acc_no, p, taken))
             await asyncio.sleep(2)  # 账号之间间隔，避免风控
     if random_avatar:
-        results.append("🖼 随机风景头像：每账号下载一张不同风景图…")
+        results.append("🖼 随机风景头像：只给没头像的账号补图（已有头像跳过）…")
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
+            if await has_avatar(client):
+                results.append(f"⏭ [账号{acc_no}] 已有头像，不换")
+                continue
             tag = f"{acc_no}_{random.randint(100000, 999999)}"
             path = await asyncio.to_thread(fetch_random_landscape, DATA_DIR, tag)
             if not path:
