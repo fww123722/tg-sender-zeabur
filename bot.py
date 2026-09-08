@@ -20,7 +20,7 @@ from db import (
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
-    collect_channel_history, diag_groups, leave_group,
+    join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
@@ -888,7 +888,7 @@ def register_handlers(bot, accounts):
         await _reply(event, f"🔄 正在加入 {text} …")
         state["busy"] = True
         try:
-            r, ent = await join_group_by_link(accounts[0][1], text)
+            r, ent, used = await join_group_all_accounts(accounts, text)
             await _reply(event, r)
             if not r.startswith("✅"):
                 if r.startswith("⏳"):
@@ -897,7 +897,7 @@ def register_handlers(bot, accounts):
             await _reply(event, "正在读取群成员到名单…")
             # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
             target = ent if ent is not None else text
-            r2 = await collect_members(accounts[0][1], target)
+            r2 = await collect_members(used or accounts[0][1], target)
             await _reply(event, r2, buttons=groups_menu_kb())
         finally:
             state["busy"] = False
@@ -918,11 +918,11 @@ def register_handlers(bot, accounts):
                     continue
                 link = m.group(0)
                 try:
-                    r1, ent = await join_group_by_link(accounts[0][1], link)
+                    r1, ent, used = await join_group_all_accounts(accounts, link)
                 except Exception:
-                    r1, ent = "加群失败", None
+                    r1, ent, used = "加群失败", None, None
                 try:
-                    r2 = await collect_members(accounts[0][1], ent if ent is not None else link,
+                    r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
                                            recent_only_days=state.get("recent_only_days", 0))
                 except Exception:
                     r2 = "拉人失败"
@@ -937,9 +937,9 @@ def register_handlers(bot, accounts):
         await _reply(event, "检测到群链接，正在加入并读取成员…")
         state["busy"] = True
         try:
-            r, ent = await join_group_by_link(accounts[0][1], link)
+            r, ent, used = await join_group_all_accounts(accounts, link)
             await _reply(event, r)
-            r2 = await collect_members(accounts[0][1], ent if ent is not None else link,
+            r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
                                      recent_only_days=state.get("recent_only_days", 0))
             await _reply(event, r2, buttons=main_menu_kb())
         finally:

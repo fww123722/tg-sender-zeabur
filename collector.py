@@ -377,9 +377,12 @@ def _decode_invite_hash(h):
         import base64
         pad = "=" * (-len(h) % 4)
         raw = base64.urlsafe_b64decode(h + pad)
-        dc = int.from_bytes(raw[:4], "little")
-        peer = int.from_bytes(raw[4:12], "little") if len(raw) >= 12 else None
-        return f"dc={dc} peer_id={peer} bytes={len(raw)}"
+        if len(raw) < 9:
+            return f"hash长{len(h)}字/解出{len(raw)}字节 ⚠短于9字节非标准邀请hash"
+        dc = raw[0]
+        peer = int.from_bytes(raw[1:9], "little")
+        warn = "" if 1 <= dc <= 5 else " ⚠新版随机hash,dc仅供参考"
+        return f"dc={dc}{warn} peer_id={peer} 解出{len(raw)}字节 hex={raw.hex()}"
     except Exception as e:
         return f"?({type(e).__name__})"
 
@@ -393,6 +396,39 @@ async def _peek_invite_title(client, invite_hash):
         return None
     chat = getattr(check, "chat", None)
     return getattr(chat, "title", None) or getattr(check, "title", None)
+
+
+async def join_group_all_accounts(accounts, link):
+    """逐账号尝试加群，谁加得上用谁；全失败时列出每个账号的错。
+    用途：区分「链接/群侧失效（两账号同错）」还是「单账号被限制（错不同）。"""
+    lines = []
+    for idx, (acc_no, client, phone) in enumerate(accounts):
+        tag = getattr(client, "phone", None) or phone or f"账号{acc_no}"
+        try:
+            txt, ent = await join_group_by_link(client, link)
+        except Exception as e:
+            log.warning(f"[加群] 账号{acc_no} 异常 {type(e).__name__}: {e}", exc_info=True)
+            txt, ent = f"❌ {type(e).__name__}: {e}", None
+        first = str(txt).splitlines()[0][:100]
+        log.info(f"[加群] 账号{acc_no}({tag}) 结果: {first}")
+        lines.append((tag, first, ent, client))
+        if first.startswith("✅") or first.startswith("⏳"):
+            return (f"{txt}\n📝 使用账号：{tag}", ent, client)
+        if idx < len(accounts) - 1:
+            await asyncio.sleep(1.2)
+    if not lines:
+        return ("❌ 无可用账号", None, None)
+    if len(lines) > 1:
+        detail = "\n".join(f"  [{t}] {m}" for t, m, _, _ in lines)
+        same = len({m for _, m, _, _ in lines}) == 1
+        hint = ("🔍 两个账号报同一个错 → 问题在链接/群侧（链接已失效或已被用过），与账号无关"
+                if same else
+                "🔍 两个账号错不同 → 可能是单账号风控，可让群主直接「添加成员」拉人")
+        body = f"{lines[0][1]}\n—— {len(lines)} 个账号均未成功 ——\n{detail}\n{hint}"
+    else:
+        body = (f"{lines[0][1]}\n💡 仅 1 个账号可用，无法交叉验证。可多绑一个账号重试，"
+                f"或让群主直接「添加成员」把账号拉进群。")
+    return (body, lines[0][2], lines[0][3])
 
 
 async def join_group_by_link(client, link):
