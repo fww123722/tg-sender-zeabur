@@ -18,7 +18,7 @@ from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInv
 from telethon.tl.types import (
     Channel, Chat, ChatInvite, ChatInviteAlready, User,
     UserStatusOnline, UserStatusOffline, UserStatusRecently,
-    UserStatusLastWeek, UserStatusLastMonth, UserStatusLongAgo, UserStatusEmpty,
+    UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty,
 )
 
 
