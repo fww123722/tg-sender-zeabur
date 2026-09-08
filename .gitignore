@@ -28,3 +28,7 @@ env/
 
 # 其他
 .DS_Store
+
+# 多人共管回归测试的输出产物
+!test_multiuser.py
+test_multiuser.result.txt

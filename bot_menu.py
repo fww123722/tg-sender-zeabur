@@ -155,8 +155,17 @@ def _kb(rows):
 # =====================================================================
 #  各菜单键盘
 # =====================================================================
-def main_menu_kb():
-    """主菜单：3×2 布局（第一行 群发/群管理/账号，第二行 看板/设置/举报）"""
+def main_menu_kb(is_operator: bool = False):
+    """主菜单。
+
+    主人：3×2（群发/群管理/账号 + 看板/设置/举报）
+    操作员与主人同权（老板要求全开），两者渲染同一套键盘。
+    """
+    if is_operator:
+        return _kb([
+            (BTN["campaign"], BTN["groups"]),
+            (BTN["dashboard"],),
+        ])
     return _kb([
         (BTN["campaign"], BTN["groups"], BTN["accounts"]),
         (BTN["dashboard"], BTN["settings"], BTN["report"]),
@@ -224,8 +233,14 @@ def settings_inline_kb(recent_on=False, repeat_on=False, parse_label="纯文本"
     ]
 
 
-def groups_menu_kb():
-    """群管理菜单：我的群 / 加群 / 批量导入 / 删除群 / 返回"""
+def groups_menu_kb(is_operator: bool = False):
+    """群管理菜单：我的群 / 加群 / 批量导入 / 删除群 / 返回（操作员同权）"""
+    if is_operator:
+        return _kb([
+            (BTN["my_groups"], BTN["add_group"]),
+            (BTN["batch_import"],),
+            (BTN["back"],),
+        ])
     return _kb([
         (BTN["my_groups"], BTN["add_group"]),
         (BTN["batch_import"], BTN["del_group"]),
@@ -311,17 +326,21 @@ def reason_menu_kb():
 # =====================================================================
 #  各菜单文本
 # =====================================================================
-def main_menu_text(accounts, groups_count, targets_count, sent_count, pool_count, busy: bool):
-    """主菜单文本，含实时数据摘要。"""
+def main_menu_text(accounts, groups_count, targets_count, sent_count, pool_count, busy: bool,
+                   role: str = "owner", name: str = "", busy_tip: str = ""):
+    """主菜单文本，含实时数据摘要。多人使用时标出当前身份。"""
+    head = f"📋 控制面板｜{('主人：' + name) if role == 'owner' else ('操作员：' + name)}\n\n" if name else "📋 控制面板\n\n"
+    lock = f"\n🔒 当前占用：{busy_tip}\n" if busy and busy_tip else ""
     return (
-        "📋 控制面板\n\n"
+        head +
         f"👤 账号: {len(accounts)} 个在线 | "
         f"📁 群组: {groups_count} 个\n"
         f"📋 名单: {targets_count} 人 | "
         f"已发(去重): {sent_count} 人\n"
         f"📝 文案池: {pool_count} 条\n"
-        f"{'⏳ 正在执行任务中…' if busy else '🟢 空闲中'}\n\n"
-        "请选择功能："
+        f"{'⏳ 正在执行任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
+        + ("" if role == "owner" else "ℹ️ 你是操作员：功能已全部开放，只有增删操作员需找主人。\n")
+        + "请选择功能："
     )
 
 
@@ -337,8 +356,12 @@ def campaign_menu_text():
     )
 
 
-def groups_menu_text():
-    return "📥 群管理\n\n查看已加入的群、添加新群、批量导入群链接、删除群记录。\n💡 删除群只移除 Bot 里的记录，不会退出 Telegram 群。"
+def groups_menu_text(is_operator: bool = False):
+    base = "📥 群管理\n\n查看已加入的群、添加新群、批量导入群链接。"
+    if is_operator:
+        return base + "、删除群记录。\n"
+    return (base + "、删除群记录。\n"
+            "💡「删除群」会先让在该群的账号退群，再删除记录，不可逆。")
 
 
 def accounts_menu_text():

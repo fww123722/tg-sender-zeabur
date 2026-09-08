@@ -9,18 +9,20 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from config import ACCS, API_ID, API_HASH, BOT_TOKEN, OWNER_ID, log
-from config import ACTIVE_ACCOUNTS, ZIP_RECEIVED
-from db import DB
+from config import ACTIVE_ACCOUNTS, ZIP_RECEIVED, refresh_operators
+from config import get_notify, set_notify
+from db import DB, db_load_operators
 from health import start_health_server
 from accounts import _find_session, _register_zip_receiver
 from bot import register_handlers
 
 
-async def load_accounts(bot):
+async def load_accounts(bot, notify=None):
     """从 PostgreSQL 扫描所有已保存的 tg_session_* 加载账号，返回 (ready, failed)。
     账号全部通过 Bot 对话登录并持久化到 DB；重启后自动恢复，无需环境变量预设手机号。"""
     ready = []
     failed = []
+    to = notify or OWNER_ID   # 启动期给主人；由上传触发时给发起人
     acc_nos = DB.list_sessions("tg_session_")
     if not acc_nos:
         return ready, failed
@@ -49,7 +51,7 @@ async def load_accounts(bot):
                 log.warning("⚠️ 保存 session 到 PostgreSQL 失败: %s", exc)
             try:
                 await bot.send_message(
-                    OWNER_ID, f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})"
+                    to, f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})"
                 )
             except Exception:
                 pass
@@ -61,7 +63,7 @@ async def load_accounts(bot):
             except Exception:
                 pass
             try:
-                await bot.send_message(OWNER_ID, f"❌ [账号{acc_no}] 加载 session 失败: {e}")
+                await bot.send_message(to, f"❌ [账号{acc_no}] 加载 session 失败: {e}")
             except Exception:
                 pass
     return ready, failed
@@ -70,6 +72,9 @@ async def load_accounts(bot):
 async def main():
     start_health_server()
     DB.init()
+
+    # 多人共管：启动时把操作员白名单从 DB 灌进内存缓存（失败则只剩 env 兜底）
+    refresh_operators(db_load_operators() or {})
 
     # bot_session：优先从 PostgreSQL 加载 StringSession，容器重启不丢失
     bot_session_str = DB.load_session("bot_session")
@@ -136,7 +141,7 @@ async def main():
                 if time.time() >= remind_at:
                     try:
                         await bot.send_message(
-                            OWNER_ID,
+                            get_notify(),
                             "⏳ 仍未添加账号。点「账号状态」→「添加账号」发送手机号，或发 /login。",
                         )
                     except Exception:
@@ -145,7 +150,7 @@ async def main():
                 continue
             ZIP_RECEIVED.clear()
             log.info("📦 已收到 session 压缩包，尝试重新加载…")
-            ready, failed = await load_accounts(bot)
+            ready, failed = await load_accounts(bot, get_notify())
             ACTIVE_ACCOUNTS.clear()
             ACTIVE_ACCOUNTS.extend(ready)
 
@@ -165,7 +170,7 @@ async def main():
             ZIP_RECEIVED.clear()
             log.info("♻️ 收到新 session 压缩包，开始热替换账号…")
             try:
-                await bot.send_message(OWNER_ID, "♻️ 收到新 session 压缩包，正在热替换账号…")
+                await bot.send_message(get_notify(), "♻️ 收到新 session 压缩包，正在热替换账号…")
             except Exception:
                 pass
             old_clients = [(acc_no, client) for acc_no, client, _ph in ACTIVE_ACCOUNTS]
@@ -206,7 +211,7 @@ async def main():
                     asyncio.create_task(client.run_until_disconnected())
                 log.info(msg)
                 try:
-                    await bot.send_message(OWNER_ID, msg)
+                    await bot.send_message(get_notify(), msg)
                 except Exception:
                     pass
             else:
@@ -219,10 +224,11 @@ async def main():
                     except Exception:
                         pass
                 try:
-                    await bot.send_message(OWNER_ID, msg)
+                    await bot.send_message(get_notify(), msg)
                 except Exception:
                     pass
 
+            set_notify(None)  # 操作已汇报完，后续系统消息回归主人
     # 运行所有组件
     tasks = [bot.run_until_disconnected(), hot_reload_watcher()]
     for acc_no, client, phone in ready:

@@ -11,13 +11,23 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
 import config
-from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, ZIP_RECEIVED, API_ID, API_HASH, OWNER_ID, log
+from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, ZIP_RECEIVED, API_ID, API_HASH, OWNER_ID, is_authorized, log
 
 
-async def login_send(bot, text):
-    """登录流程向 owner 发消息（容错）"""
+def _login_target():
+    """\u672c\u6b21\u767b\u5f55\u6d41\u7a0b\u8be5\u8ddf\u8c01\u5bf9\u8bdd\uff08\u56de\u843d\u5230\u4e3b\u4eba\uff09\u3002"""
+    ls = config.LOGIN_STATE or {}
+    return ls.get("requester") or OWNER_ID
+
+
+async def login_send(bot, text, to=None):
+    """\u767b\u5f55\u6d41\u7a0b\u5411\u53d1\u8d77\u4eba\u53d1\u6d88\u606f\uff08\u5bb9\u9519\uff09\u3002
+
+    \u591a\u4eba\u5171\u7ba1\uff1a\u8c01\u70b9\u300c\u767b\u5f55 / \u6dfb\u52a0\u8d26\u53f7\u300d\uff0c\u9a8c\u8bc1\u7801\u548c\u63d0\u793a\u5c31\u53d1\u56de\u7ed9\u8c01\uff1b
+    requester \u7531\u8c03\u7528\u65b9\u5199\u8fdb LOGIN_STATE\u3002
+    """
     try:
-        await bot.send_message(OWNER_ID, text)
+        await bot.send_message(to or _login_target(), text)
     except Exception:
         pass
 
@@ -108,7 +118,7 @@ async def login_flow(bot, client, phone, acc_no, owner_entity):
         config.LOGIN_STATE = None
 
 
-async def _login_accounts(bot, accounts, targets, owner_entity):
+async def _login_accounts(bot, accounts, targets, owner_entity, requester=None):
     """通过 Bot 交互式登录指定账号（验证码/2FA 密码通过 Bot 问答）。
     登录成功后自动加入 ACTIVE_ACCOUNTS 并启动客户端。"""
     for acc_no, client, phone in accounts:
@@ -131,6 +141,7 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 "client": client,
                 "owner_entity": owner_entity,
                 "queue": asyncio.Queue(),
+                "requester": requester or owner_entity,
             }
             ok = await login_flow(bot, client, phone, acc_no, owner_entity)
             if ok:
@@ -158,7 +169,7 @@ async def _login_accounts(bot, accounts, targets, owner_entity):
                 pass
 
 
-async def _add_account_interactive(bot, phone, owner_entity):
+async def _add_account_interactive(bot, phone, owner_entity, requester=None):
     """通过 Bot 交互式添加任意账号：输入手机号 → 验证码 → （2FA密码）→ 上线。
     不依赖环境变量，成功后自动分配下一个可用序号。"""
     from db import DB
@@ -192,6 +203,7 @@ async def _add_account_interactive(bot, phone, owner_entity):
             "client": client,
             "owner_entity": owner_entity,
             "queue": asyncio.Queue(),
+            "requester": requester or owner_entity,
         }
         ok = await login_flow(bot, client, phone, acc_no, owner_entity)
         if ok:
@@ -266,7 +278,7 @@ async def _register_zip_receiver(bot):
 
     @bot.on(events.NewMessage())
     async def on_early_zip(event):
-        if event.sender_id != OWNER_ID:
+        if not is_authorized(event.sender_id):
             return
         if not event.document and not event.file:
             return
@@ -292,6 +304,7 @@ async def _register_zip_receiver(bot):
             if err:
                 await event.client.send_message(event.chat_id, f"❌ 解压失败: {err}")
                 return
+            config.set_notify(event.sender_id)  # 后续热替换进度发给他，不扰主人
             ZIP_RECEIVED.set()
             await event.client.send_message(event.chat_id, f"✅ 已解压 {cnt} 个 session 文件。正在重新加载…")
         except Exception as e:

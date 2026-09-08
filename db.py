@@ -116,6 +116,47 @@ class DB:
                 updated_at TIMESTAMPTZ DEFAULT now()
             )
         """)
+        # 操作员白名单表（多人共管同一套）：owner 在 Bot 里 /addop 即可增删
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS operators (
+                uid BIGINT PRIMARY KEY,
+                name TEXT DEFAULT '',
+                enabled BOOLEAN DEFAULT TRUE,
+                added_by BIGINT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        # 操作审计表：谁在什么时候干了什么，全部留痕
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS op_log (
+                id BIGSERIAL PRIMARY KEY,
+                actor_uid BIGINT NOT NULL,
+                actor_name TEXT DEFAULT '',
+                action TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS op_log_actor_time_idx
+                ON op_log (actor_uid, created_at DESC)
+        """)
+        # 群发任务归属：campaign 记录是谁发起的，看板按人统计
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id BIGSERIAL PRIMARY KEY,
+                actor_uid BIGINT NOT NULL,
+                actor_name TEXT DEFAULT '',
+                group_key TEXT DEFAULT '',
+                group_title TEXT DEFAULT '',
+                target_count INT DEFAULT 0,
+                sent_count INT DEFAULT 0,
+                status TEXT DEFAULT 'running',
+                text_preview TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT now(),
+                finished_at TIMESTAMPTZ
+            )
+        """)
 
     @classmethod
     def getconn(cls):
@@ -443,3 +484,186 @@ def db_clear_cooldown(account_no=None):
         log.warning(f"冷却记账清除失败: {e}")
     finally:
         DB.putconn(conn)
+
+
+# =====================================================================
+#  多人共管：operators / op_log / campaigns
+# =====================================================================
+def db_load_operators():
+    """返回 {uid: name}（仅 enabled）。失败返回 None，调用方保留旧缓存。"""
+    try:
+        conn = DB.getconn()
+    except Exception as e:
+        log.warning(f"读取操作员列表失败（连接）: {e}")
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT uid, name FROM operators WHERE enabled = TRUE")
+            return {int(r[0]): (r[1] or "") for r in cur.fetchall()}
+    except Exception as e:
+        log.warning(f"读取操作员列表失败: {e}")
+        return None
+    finally:
+        DB.putconn(conn)
+
+
+def db_add_operator(uid, name="", added_by=0) -> bool:
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO operators (uid, name, enabled, added_by, created_at)
+                    VALUES (%s, %s, TRUE, %s, now())
+                    ON CONFLICT (uid) DO UPDATE
+                    SET name = EXCLUDED.name, enabled = TRUE, added_by = EXCLUDED.added_by
+                """, (int(uid), (name or "")[:64], int(added_by or 0)))
+            conn.commit()
+            return True
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"添加操作员失败: {e}")
+        return False
+
+
+def db_drop_operator(uid) -> bool:
+    """停用操作员（软删除，保留审计关联）。"""
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE operators SET enabled = FALSE WHERE uid = %s", (int(uid),))
+                n = cur.rowcount
+            conn.commit()
+            return n > 0
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"停用操作员失败: {e}")
+        return False
+
+
+def db_log_op(actor_uid, actor, action, detail=""):
+    """写审计日志（失败不影响主流程）。"""
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO op_log (actor_uid, actor_name, action, detail) VALUES (%s, %s, %s, %s)",
+                    (int(actor_uid or 0), (actor or "")[:64], (action or "")[:64],
+                     (detail or "")[:500]),
+                )
+            conn.commit()
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"审计日志写入失败: {e}")
+
+
+def db_op_log_since(uid, since_epoch, actions=None):
+    """查某人在 since_epoch 之后的操作记录（用于确认是不是自己重复点了）。"""
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                sql = ("SELECT action, detail, created_at FROM op_log "
+                       "WHERE actor_uid = %s AND created_at > to_timestamp(%s)")
+                args = [int(uid), int(since_epoch)]
+                if actions:
+                    sql += " AND action = ANY(%s)"
+                    args.append(list(actions))
+                cur.execute(sql + " ORDER BY created_at DESC LIMIT 5", args)
+                return cur.fetchall()
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"审计查询失败: {e}")
+        return []
+
+
+def db_op_log_recent(limit=20):
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT actor_name, actor_uid, action, detail, created_at
+                    FROM op_log ORDER BY id DESC LIMIT %s
+                """, (int(limit),))
+                return cur.fetchall()
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"审计读取失败: {e}")
+        return []
+
+
+def db_campaign_start(uid, actor, group_key, group_title, target_count, text_preview=""):
+    """登记一次群发任务归属，返回 campaign id（失败返回 None）。"""
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO campaigns
+                        (actor_uid, actor_name, group_key, group_title,
+                         target_count, status, text_preview)
+                    VALUES (%s, %s, %s, %s, %s, 'running', %s)
+                    RETURNING id
+                """, (int(uid or 0), (actor or "")[:64], str(group_key or "")[:64],
+                      (group_title or "")[:120], int(target_count or 0),
+                      (text_preview or "")[:200]))
+                cid = cur.fetchone()[0]
+            conn.commit()
+            return int(cid)
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"群发任务登记失败: {e}")
+        return None
+
+
+def db_campaign_finish(campaign_id, sent_count, status="done"):
+    if not campaign_id:
+        return
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE campaigns
+                    SET sent_count = %s, status = %s, finished_at = now()
+                    WHERE id = %s
+                """, (int(sent_count or 0), (status or "done")[:24], int(campaign_id)))
+            conn.commit()
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"群发任务收尾失败: {e}")
+
+
+def db_campaign_leaderboard(days=7):
+    """按人统计近 N 天的群发任务与发出量。"""
+    try:
+        conn = DB.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT actor_uid,
+                           MAX(actor_name),
+                           COUNT(*),
+                           COALESCE(SUM(sent_count), 0),
+                           COALESCE(SUM(target_count), 0)
+                    FROM campaigns
+                    WHERE created_at > now() - (%s || ' days')::interval
+                    GROUP BY actor_uid
+                    ORDER BY COALESCE(SUM(sent_count), 0) DESC
+                """, (str(int(days)),))
+                return cur.fetchall()
+        finally:
+            DB.putconn(conn)
+    except Exception as e:
+        log.warning(f"群发统计失败: {e}")
+        return []

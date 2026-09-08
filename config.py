@@ -27,6 +27,27 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = _env_int("OWNER_ID", 0)
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+
+def _env_ids(name):
+    """解析逗号/空格/分号分隔的 Telegram user_id 列表。"""
+    raw = os.environ.get(name, "") or ""
+    out = []
+    for part in re.split(r"[,;\s]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            pass
+    return out
+
+
+# 多人使用：操作员白名单。
+# 运行时以 PostgreSQL operators 表为准（/addop /dropop 即刻生效），
+# 环境变量 OPERATOR_IDS 仅作首次启动引导 + DB 暂不可用时的兜底。
+OPERATOR_IDS_ENV = set(_env_ids("OPERATOR_IDS"))
+
 MIN_DELAY = _env_int("MIN_DELAY", 20)
 MAX_DELAY = _env_int("MAX_DELAY", 60)
 DAILY_LIMIT = _env_int("DAILY_LIMIT", 100)   # 每个账号每日上限
@@ -98,10 +119,83 @@ logging.basicConfig(
 log = logging.getLogger("tg_sender")
 
 # =====================================================================
+#  多人使用：角色判定（owner = 主人，operator = 被授权的操作员）
+#  白名单存在 PostgreSQL operators 表，OPERATORS 是它的内存缓存，
+#  启动时由 main.py 载入，/addop /dropop 实时同步。
+# =====================================================================
+OPERATORS = {}  # {uid: display_name}
+
+
+def refresh_operators(mapping):
+    """用 DB 返回的 {uid: name} 整体替换缓存，并合入 env 兜底 ID。"""
+    new = {}
+    for uid, name in (mapping or {}).items():
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        new[uid] = (str(name) if name else "").strip() or f"user{uid}"
+    for uid in OPERATOR_IDS_ENV:
+        new.setdefault(uid, f"user{uid}")
+    OPERATORS.clear()
+    OPERATORS.update(new)
+    log.info(f"👥 操作员白名单已刷新：共 {len(OPERATORS)} 人")
+
+
+def add_operator(uid, name=""):
+    uid = int(uid)
+    OPERATORS[uid] = (str(name) if name else "").strip() or OPERATORS.get(uid) or f"user{uid}"
+
+
+def drop_operator(uid):
+    OPERATORS.pop(int(uid), None)
+
+
+def is_owner(uid) -> bool:
+    return bool(uid) and uid == OWNER_ID
+
+
+def is_operator(uid) -> bool:
+    return bool(uid) and uid != OWNER_ID and uid in OPERATORS
+
+
+def is_authorized(uid) -> bool:
+    return is_owner(uid) or is_operator(uid)
+
+
+# =====================================================================
+#  进行中操作的汇报去向
+#  默认发主人；谁发起了 session 热替换/批量加载，
+#  就临时改发给谁，避免操作者的进度消息全灌进主人聊天。
+# =====================================================================
+NOTIFY_UID = OWNER_ID
+
+
+def set_notify(uid):
+    """把汇报临时指向发起人；传 None/0 回落到主人。"""
+    global NOTIFY_UID
+    try:
+        NOTIFY_UID = int(uid) if uid else OWNER_ID
+    except (TypeError, ValueError):
+        NOTIFY_UID = OWNER_ID
+    return NOTIFY_UID
+
+
+def get_notify():
+    return NOTIFY_UID or OWNER_ID
+
+
+def actor_name(uid) -> str:
+    if is_owner(uid):
+        return "主人"
+    return OPERATORS.get(uid) or f"user{uid}"
+
+# =====================================================================
 #  全局状态
 # =====================================================================
 state = {
     "busy": False,
+    "busy_by": None,   # 当前占用号池的人 {uid, name, at}
     "paused": False,
     "stop": False,
     "min_delay": MIN_DELAY,
