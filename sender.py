@@ -209,11 +209,12 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     if cooling_note:
         log.info(f"⏳ 冷却记账：{cooling_note}")
 
-    # 每个账号分配到的子集：轮流均匀分配（只在可用账号间分配）
-    per_account = {acc_no: [] for acc_no, *_ in accounts}
-    for i, uid in enumerate(uid_list):
-        acc_no = avail[i % len(avail)][0]
-        per_account[acc_no].append(uid)
+    # 共享任务队列：不再预先切分目标。健康账号发完一条立刻领下一条，
+    # 额度多的号自然多发货（老板要求：一个账号尽可能多发）；
+    # 撞 430 的号把目标交还队列，由其他号接手，自己收手不再硬试。
+    task_q = asyncio.Queue()
+    for uid in uid_list:
+        task_q.put_nowait(uid)
 
     # 共享进度（asyncio 单线程，普通 dict 安全）
     progress = {
@@ -228,6 +229,9 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     first_round_fail = {}
     # 本轮已撞过 430 的账号：430 是账号级限流，同轮内不再拿它硬试剩余目标
     rate_limited_acc = set()
+    # 每个目标已被真实尝试的次数 / 已终局(成功·永久失败·试遍)的集合
+    attempts = {uid: 0 for uid in uid_list}
+    finished = set()
 
     async def progress_reporter():
         """后台协程：每 15 秒向 owner 汇总推送一次进度"""
@@ -251,49 +255,64 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         # 老板要求：进度不列每账号明细，只报总计
         await _report("\n".join(lines))
 
-    async def worker(client, acc_no, my_uids):
-        """单个账号的处理循环"""
+    async def worker(client, acc_no):
+        """从共享队列不断领目标：能发就一直发（尽可能多发），
+        撞 430 立刻交还队列换号并收手，不占着目标死等。"""
         sent_set = db_load_sent(acc_no)
         stats = db_load_stats(acc_no)
-        if my_uids:
-            # 预热：账号刚连上立刻对外发信最容易吃 430，先随机错开几秒再开跑
-            await asyncio.sleep(random.uniform(3, 8))
-        for uid in my_uids:
-            if state["stop"]:
+        warmed = False
+        while not state["stop"]:
+            # 本号已撞过 430（账号级限流）→ 收手，把剩余目标留给其他号
+            if len(avail) > 1 and acc_no in rate_limited_acc:
                 return
-            if state["paused"]:
-                await _report(f"⏸ 账号{acc_no} 已暂停")
-                # 暂停时循环等待，不退出
-                while state["paused"] and not state["stop"]:
-                    await asyncio.sleep(5)
-                if state["stop"]:
-                    return
             if stats["sent_today"] >= state["daily_limit"]:
                 await _report(f"🚫 账号{acc_no} 今日已达上限 {state['daily_limit']} 条，该账号停止")
                 return
+            try:
+                uid = task_q.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if not warmed:
+                # 预热：账号刚连上立刻对外发信最容易吃 430，先随机错开几秒
+                warmed = True
+                await asyncio.sleep(random.uniform(3, 8))
+            if state["paused"]:
+                await _report(f"⏸ 账号{acc_no} 已暂停")
+                while state["paused"] and not state["stop"]:
+                    await asyncio.sleep(5)
+                if state["stop"]:
+                    task_q.put_nowait(uid)
+                    return
             if uid in sent_set and not state.get("allow_repeat"):
                 progress["skipped"] += 1
                 progress["done"] += 1
+                finished.add(uid)
                 continue
-            # 同轮内该账号已撞过 430 → 不再硬试（省掉每个目标白等的几十秒），
-            # 直接记为限流失败，交给第二轮换号补发
-            if len(avail) > 1 and acc_no in rate_limited_acc:
-                progress["done"] += 1
-                progress["fail"] += 1
-                progress["per_acc"][acc_no]["fail"] += 1
-                first_round_fail[uid] = (acc_no, "Too many requests (账号本轮已限流，跳过未试)")
-                log.info(f"[账号{acc_no}] 本轮已限流，{uid} 直接转第二轮补发")
-                continue
+            attempts[uid] += 1
             status, err = await _send_one(client, acc_no, uid, targets.get(uid, {}),
                                           text, file=file, image=image,
                                           backoff=len(avail) == 1)
             if status == "skip":
                 progress["skipped"] += 1
                 progress["done"] += 1
+                finished.add(uid)
                 continue
-            ok = status == "ok"
+            # 限流/实体类失败且还有号可换 → 交还队列让别人接手
+            if status == "fail" and (_is_rate_limited(err) or _is_bad_peer(err)) \
+                    and attempts[uid] < max(1, len(avail)):
+                if _needs_cooldown(err):
+                    rate_limited_acc.add(acc_no)
+                    _mark_cooldown(acc_no, err)
+                task_q.put_nowait(uid)
+                log.info(f"[账号{acc_no}] {uid} 失败({str(err)[:32]})，"
+                         f"已交还队列换号（第{attempts[uid]}次尝试）")
+                if acc_no in rate_limited_acc and len(avail) > 1:
+                    return
+                continue
+            # 终局：成功 / 永久失败 / 已试遍可用账号
+            finished.add(uid)
             progress["done"] += 1
-            if ok:
+            if status == "ok":
                 progress["sent"] += 1
                 progress["per_acc"][acc_no]["sent"] += 1
                 db_add_sent(acc_no, uid)
@@ -317,10 +336,20 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     reporter = asyncio.create_task(progress_reporter())
 
     tasks = [
-        asyncio.create_task(worker(client, acc_no, per_account[acc_no]))
-        for acc_no, client, _ph in accounts
+        asyncio.create_task(worker(client, acc_no))
+        for acc_no, client, _ph in avail
     ]
     await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 收尾：所有可用号都提前收手（全限流/全达上限）时队列里可能还有没派发的目标，
+    # 计入失败并交给第二轮，保证 total/done 对得上、不漏人
+    for uid in uid_list:
+        if uid in finished:
+            continue
+        progress["done"] += 1
+        progress["fail"] += 1
+        finished.add(uid)
+        first_round_fail[uid] = (0, "Too many requests (未派发：可用账号已全部限流或达上限)")
 
     # 收尾：停掉汇报协程，发最终汇总
     reporter.cancel()
@@ -329,11 +358,12 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     except asyncio.CancelledError:
         pass
 
-    # ===== 第二轮补发：把因限流/实体失效失败的目标，换别的账号再试 =====
-    # 场景：目标数 < 账号数时轮转分配，被限流的账号抱着目标死，其余账号全程空跑没用到额度
+    # ===== 第二轮补发：兜住队列里"试遍可用账号仍失败"与"未派发"的目标 =====
+    # 正常路径下队列已自动完成换号交接（worker 撞 430 会把目标放回队列），
+    # 这里只处理 worker 全部收手后仍未送达的目标，用 avail 轮转再试一轮
     retryable = {u: v for u, v in first_round_fail.items()
                  if _is_rate_limited(v[1]) or _is_bad_peer(v[1])}
-    if retryable and len(accounts) > 1 and not state["stop"]:
+    if retryable and len(avail) > 1 and not state["stop"]:
         await _report(f"🔁 第二轮补发：{len(retryable)} 个目标换账号重试")
         for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
             info = targets.get(uid, {})
