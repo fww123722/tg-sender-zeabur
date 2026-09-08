@@ -49,9 +49,9 @@ from db import db_add_targets, db_count_targets, db_add_group, db_get_all_groups
 
 
 async def _resolve_entity(client, peer_arg):
-    """解析群实体。纯数字 ID 在 session 无缓存时会查不到，先扫对话列表建立缓存再重试。"""
+    """解析群实体（失败抛异常）。纯数字 ID 在 session 无缓存时会查不到，先扫对话列表建立缓存再重试。"""
     try:
-        return await client.get_entity(peer_arg), None
+        return await client.get_entity(peer_arg)
     except Exception as first_err:
         # 仅对纯数字 ID/带-100前缀的情况做对话扫描回退
         s = str(peer_arg).strip()
@@ -67,13 +67,13 @@ async def _resolve_entity(client, peer_arg):
         from telethon.tl.types import PeerChannel, PeerChat
         for peer in (PeerChannel(raw), PeerChat(raw)):
             try:
-                return await client.get_entity(peer), None
+                return await client.get_entity(peer)
             except Exception:
                 pass
-        # 兕底：扫对话按绝对值匹配，兼容原始/-负数(basic群)/-100前缀(频道) 三种形态
+        # 兜底：扫对话按绝对值匹配，兼容原始/-负数(basic群)/-100前缀(频道) 三种形态
         async for dialog in client.iter_dialogs(limit=200):
             if abs(dialog.id) == raw:
-                return dialog.entity, None
+                return dialog.entity
         raise first_err
 
 
