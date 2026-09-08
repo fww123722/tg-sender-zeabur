@@ -198,9 +198,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             f"📊 群发进度 {bar} {pct:.0f}%",
             f"   {done}/{total} | ✅ {progress['sent']} ❌ {progress['fail']} ⏭ {progress['skipped']}",
         ]
-        for acc_no, _client, _ph in accounts:
-            pa = progress["per_acc"].get(acc_no, {"sent": 0, "fail": 0})
-            lines.append(f"   [账号{acc_no}] ✅{pa['sent']} ❌{pa['fail']}")
+        # 老板要求：进度不列每账号明细，只报总计
         await _report("\n".join(lines))
 
     async def worker(client, acc_no, my_uids):
@@ -305,20 +303,11 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 await asyncio.sleep(random.uniform(state["min_delay"], state["max_delay"]))
 
     pct = 100.0 if not progress["total"] else (progress["done"] / progress["total"] * 100)
-    parts = []
-    total_s = total_f = 0
-    for acc_no, _client, _ph in accounts:
-        pa = progress["per_acc"].get(acc_no, {"sent": 0, "fail": 0})
-        s, f = pa["sent"], pa["fail"]
-        total_s += s
-        total_f += f
-        parts.append(f"账号{acc_no}:成功{s}失败{f}")
-    await _report(
-        f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
-        + "\n".join(parts)
-        + f"\n合计：成功 {total_s}，失败 {total_f}，跳过 {progress['skipped']}"
-    )
-    return f"✅ 多账号群发完成（{len(accounts)}个账号）\n" + "\n".join(parts) + f"\n合计：成功 {total_s}，失败 {total_f}，跳过 {progress['skipped']}"
+    # 老板要求：结果不列每账号明细；总计用全局计数器（per_acc 仍内部维护，供补发回冲）
+    summary = (f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
+               f"合计：成功 {progress['sent']}，失败 {progress['fail']}，跳过 {progress['skipped']}")
+    await _report(summary)
+    return summary
 
 
 async def broadcast_to_groups(client, group_args, text, owner_entity, file=None, image=None):
