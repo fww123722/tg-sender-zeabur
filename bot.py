@@ -888,14 +888,16 @@ def register_handlers(bot, accounts):
         await _reply(event, f"🔄 正在加入 {text} …")
         state["busy"] = True
         try:
-            r = await join_group_by_link(accounts[0][1], text)
+            r, ent = await join_group_by_link(accounts[0][1], text)
             await _reply(event, r)
             if not r.startswith("✅"):
                 if r.startswith("⏳"):
                     await _reply(event, "群主批准后再点一次「加群」发同一链接，即可入表+拉名单。", buttons=groups_menu_kb())
                 return
             await _reply(event, "正在读取群成员到名单…")
-            r2 = await collect_members(accounts[0][1], text)
+            # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
+            target = ent if ent is not None else text
+            r2 = await collect_members(accounts[0][1], target)
             await _reply(event, r2, buttons=groups_menu_kb())
         finally:
             state["busy"] = False
@@ -916,11 +918,11 @@ def register_handlers(bot, accounts):
                     continue
                 link = m.group(0)
                 try:
-                    r1 = await join_group_by_link(accounts[0][1], link)
+                    r1, ent = await join_group_by_link(accounts[0][1], link)
                 except Exception:
-                    r1 = "加群失败"
+                    r1, ent = "加群失败", None
                 try:
-                    r2 = await collect_members(accounts[0][1], link,
+                    r2 = await collect_members(accounts[0][1], ent if ent is not None else link,
                                            recent_only_days=state.get("recent_only_days", 0))
                 except Exception:
                     r2 = "拉人失败"
@@ -935,9 +937,9 @@ def register_handlers(bot, accounts):
         await _reply(event, "检测到群链接，正在加入并读取成员…")
         state["busy"] = True
         try:
-            r = await join_group_by_link(accounts[0][1], link)
+            r, ent = await join_group_by_link(accounts[0][1], link)
             await _reply(event, r)
-            r2 = await collect_members(accounts[0][1], link,
+            r2 = await collect_members(accounts[0][1], ent if ent is not None else link,
                                      recent_only_days=state.get("recent_only_days", 0))
             await _reply(event, r2, buttons=main_menu_kb())
         finally:

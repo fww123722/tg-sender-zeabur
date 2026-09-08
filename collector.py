@@ -341,6 +341,36 @@ async def _save_group_info(client, entity):
     return title, member_count
 
 
+async def _find_dialog_by_title(client, title):
+    """按标题在对话列表里找刚加入的群（邀请链接是一次性凭证，加入后不能再拿去解析）。"""
+    if not title:
+        return None
+    t = str(title).strip().lower()
+    try:
+        async for d in client.iter_dialogs(limit=300):
+            if (getattr(d.entity, "title", "") or "").strip().lower() == t:
+                return d.entity
+    except Exception as e:
+        log.warning(f"[加群] 按标题找对话失败({title}): {e}")
+    return None
+
+
+def _entity_from_updates(res):
+    """从 ImportChatInvite 等返回的 updates 里抠出群实体。
+    注意：ChatInvite 类型本身不带 chat 字段（只有 ChatInviteAlready/Peek 才有），
+    所以必须从 updates.chats 取，否则实体永远为 None。"""
+    seen = 0
+    while res is not None and seen < 5:
+        seen += 1
+        chats = getattr(res, "chats", None)
+        if chats:
+            for c in chats:
+                if getattr(c, "title", None):
+                    return c
+        res = getattr(res, "updates", None)
+    return None
+
+
 async def join_group_by_link(client, link):
     """让账号通过群链接加入群/频道（支持私密邀请链接与公开群，支持需批准入群）。
     加群成功后自动读取群信息并存入 groups_info 表。"""
@@ -355,7 +385,8 @@ async def join_group_by_link(client, link):
         pass
     log.info(f"[加群] 发起: 输入={raw!r} 清洗后={link!r} 私密={bool(priv_m)} 公开={bool(pub_m)} "
              f"账号=@{(getattr(me, 'username', '') or getattr(me, 'phone', '') or '?')}")
-
+    # 邀请链接是一次性凭证：加群成功后绝不能拿旧链接再去解析(会报 expired)，
+    # 统一返回 (结果文本, 群实体或None)。
     try:
         if priv_m:
             invite_hash = priv_m.group(1)
@@ -363,33 +394,41 @@ async def join_group_by_link(client, link):
                 check = await client(CheckChatInviteRequest(invite_hash))
             except (InviteHashExpiredError, InviteHashInvalidError) as e:
                 log.warning(f"[加群] 邀请链接失效 hash={invite_hash}: {type(e).__name__}")
-                return "❌ 邀请链接已失效或无效"
+                return ("❌ 邀请链接已失效或无效（这条链接本身用不了，需群主重新发一条）", None)
             log.info(f"[加群] CheckChatInvite 返回 {type(check).__name__} "
                      f"request_needed={getattr(check, 'request_needed', None)} "
-                     f"title={getattr(getattr(check, 'chat', None), 'title', None) or getattr(check, 'title', None)}")
+                     f"chat={'有' if getattr(check, 'chat', None) else '无'} "
+                     f"title={getattr(check, 'title', None)}")
             if isinstance(check, ChatInviteAlready):
                 title = getattr(check.chat, "title", "?")
                 await _save_group_info(client, check.chat)
-                return f"✅ 已在群「{title}」中，已更新群信息"
+                return (f"✅ 已在群「{title}」中，已更新群信息", check.chat)
             title = getattr(check, "title", "群")
             if isinstance(check, ChatInvite) and getattr(check, "request_needed", False):
                 try:
-                    await client(ImportChatInviteRequest(invite_hash))
-                    entity = await client.get_entity(title) if title else None
-                    await _save_group_info(client, entity)
-                    return f"✅ 已加入「{title}」"
+                    res = await client(ImportChatInviteRequest(invite_hash))
+                    ent = _entity_from_updates(res) or await _find_dialog_by_title(client, title)
+                    if ent is None:
+                        return (f"⏳ 已向「{title}」发送入群申请，等待群主批准", None)
+                    await _save_group_info(client, ent)
+                    return (f"✅ 已加入「{getattr(ent, 'title', title)}」", ent)
                 except InviteRequestSentError:
                     log.info(f"[加群] 「{title}」需群主批准，申请已发送")
-                    return f"⏳ 已向「{title}」发送入群申请，等待群主批准"
+                    return (f"⏳ 已向「{title}」发送入群申请，等待群主批准", None)
             try:
-                await client(ImportChatInviteRequest(invite_hash))
-                chat = getattr(check, "chat", None)
-                if chat:
-                    await _save_group_info(client, chat)
-                log.info(f"[加群] ✅ 成功加入「{title}」")
-                return f"✅ 已成功加入「{title}」"
+                res = await client(ImportChatInviteRequest(invite_hash))
+                # 关键：ChatInvite 无 chat 字段，旧代码取 getattr(check,'chat') 永远为 None，
+                # 导致实体丢失、回退去重复解析已失效的一次性邀请链接（报 expired）。
+                ent = _entity_from_updates(res) or await _find_dialog_by_title(client, title)
+                if ent:
+                    await _save_group_info(client, ent)
+                log.info(f"[加群] ✅ 成功加入「{title}」 entity={'有' if ent else '无'}")
+                return (f"✅ 已成功加入「{title}」", ent)
             except UserAlreadyParticipantError:
-                return f"✅ 已在「{title}」中"
+                ent = await _find_dialog_by_title(client, title)
+                if ent:
+                    await _save_group_info(client, ent)
+                return (f"✅ 已在「{title}」中", ent)
         elif pub_m:
             token = pub_m.group(1)
             try:
@@ -399,7 +438,7 @@ async def join_group_by_link(client, link):
                 return (f"❌ 找不到该群/频道（可能已被封禁、用户名错误、或是需邀请的群）: {token}\n"
                         f"错误: {type(e).__name__}\n"
                         f"提示：私密群请用 t.me/xxxx 完整邀请链接（带 + 号或 joinchat/）；"
-                        f"若账号不在该群，无法用纯数字 ID 解析。")
+                        f"若账号不在该群，无法用纯数字 ID 解析。", None)
             log.info(f"[加群] 解析到实体 id={getattr(entity, 'id', '?')} "
                      f"type={type(entity).__name__} title={getattr(entity, 'title', None)} "
                      f"megagroup={getattr(entity, 'megagroup', None)} broadcast={getattr(entity, 'broadcast', None)}")
@@ -407,23 +446,23 @@ async def join_group_by_link(client, link):
                 await client(JoinChannelRequest(entity))
                 title, cnt = await _save_group_info(client, entity)
                 log.info(f"[加群] ✅ 成功加入「{title}」成员{cnt}")
-                return f"✅ 已成功加入「{title}」，成员 {cnt} 人"
+                return (f"✅ 已成功加入「{title}」，成员 {cnt} 人", entity)
             except UserAlreadyParticipantError:
                 title, cnt = await _save_group_info(client, entity)
-                return f"✅ 已在「{title}」中，成员 {cnt} 人"
+                return (f"✅ 已在「{title}」中，成员 {cnt} 人", entity)
             except InviteRequestSentError:
                 log.info(f"[加群] 「{getattr(entity, 'title', token)}」需批准")
-                return f"⏳ 已向「{getattr(entity, 'title', token)}」发送入群申请，等待批准"
+                return (f"⏳ 已向「{getattr(entity, 'title', token)}」发送入群申请，等待批准", None)
         else:
             log.warning(f"[加群] 无法识别链接格式: {raw!r}")
             return (f"❌ 无法识别的群链接: {link}\n"
                     f"支持的形式：\n"
                     f"  · 公开群 https://t.me/username\n"
                     f"  · 私密群 https://t.me/+xxxx 或 t.me/joinchat/xxxx\n"
-                    f"（纯数字群 ID 不能用于加群，只能用于拉已在群的成员）")
+                    f"（纯数字群 ID 不能用于加群，只能用于拉已在群的成员）", None)
     except FloodWaitError as e:
         log.warning(f"[加群] FloodWait {e.seconds}s (request={getattr(e, 'request', '?')})")
-        return f"⏳ 操作过于频繁，请 {e.seconds} 秒后再试"
+        return (f"⏳ 操作过于频繁，请 {e.seconds} 秒后再试", None)
     except Exception as e:
         log.warning(f"[加群] ❌ 异常 {type(e).__name__}: {e} (输入={raw!r})", exc_info=True)
-        return f"❌ 加入失败: {type(e).__name__}: {e}"
+        return (f"❌ 加入失败: {type(e).__name__}: {e}", None)
