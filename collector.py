@@ -371,6 +371,30 @@ def _entity_from_updates(res):
     return None
 
 
+def _decode_invite_hash(h):
+    """尽力从邀请链接 hash 解出 DC 与群 id，仅用于诊断日志，失败返回 '?'。"""
+    try:
+        import base64
+        pad = "=" * (-len(h) % 4)
+        raw = base64.urlsafe_b64decode(h + pad)
+        dc = int.from_bytes(raw[:4], "little")
+        peer = int.from_bytes(raw[4:12], "little") if len(raw) >= 12 else None
+        return f"dc={dc} peer_id={peer} bytes={len(raw)}"
+    except Exception as e:
+        return f"?({type(e).__name__})"
+
+
+async def _peek_invite_title(client, invite_hash):
+    """只在需要群名时尝试预检查取标题；失败一律吞掉（预检查对新链接可能误报 expired）。"""
+    try:
+        check = await client(CheckChatInviteRequest(invite_hash))
+    except Exception as e:
+        log.info(f"[加群] 预检查取标题失败(忽略): {type(e).__name__}")
+        return None
+    chat = getattr(check, "chat", None)
+    return getattr(chat, "title", None) or getattr(check, "title", None)
+
+
 async def join_group_by_link(client, link):
     """让账号通过群链接加入群/频道（支持私密邀请链接与公开群，支持需批准入群）。
     加群成功后自动读取群信息并存入 groups_info 表。"""
@@ -390,45 +414,40 @@ async def join_group_by_link(client, link):
     try:
         if priv_m:
             invite_hash = priv_m.group(1)
-            try:
-                check = await client(CheckChatInviteRequest(invite_hash))
-            except (InviteHashExpiredError, InviteHashInvalidError) as e:
-                log.warning(f"[加群] 邀请链接失效 hash={invite_hash}: {type(e).__name__}")
-                return ("❌ 邀请链接已失效或无效（这条链接本身用不了，需群主重新发一条）", None)
-            log.info(f"[加群] CheckChatInvite 返回 {type(check).__name__} "
-                     f"request_needed={getattr(check, 'request_needed', None)} "
-                     f"chat={'有' if getattr(check, 'chat', None) else '无'} "
-                     f"title={getattr(check, 'title', None)}")
-            if isinstance(check, ChatInviteAlready):
-                title = getattr(check.chat, "title", "?")
-                await _save_group_info(client, check.chat)
-                return (f"✅ 已在群「{title}」中，已更新群信息", check.chat)
-            title = getattr(check, "title", "群")
-            if isinstance(check, ChatInvite) and getattr(check, "request_needed", False):
-                try:
-                    res = await client(ImportChatInviteRequest(invite_hash))
-                    ent = _entity_from_updates(res) or await _find_dialog_by_title(client, title)
-                    if ent is None:
-                        return (f"⏳ 已向「{title}」发送入群申请，等待群主批准", None)
-                    await _save_group_info(client, ent)
-                    return (f"✅ 已加入「{getattr(ent, 'title', title)}」", ent)
-                except InviteRequestSentError:
-                    log.info(f"[加群] 「{title}」需群主批准，申请已发送")
-                    return (f"⏳ 已向「{title}」发送入群申请，等待群主批准", None)
+            log.info(f"[加群] 邀请hash={invite_hash} {_decode_invite_hash(invite_hash)} "
+                     f"→ 直接执行加入(不再预检查，预检查对新链接会误报 expired)")
+            # 关键修正：旧顺序是先 CheckChatInvite 再 Import，而新版 t.me/+xxx 链接
+            # 在 CheckChatInvite 阶段就被 Telegram 判 INVITE_HASH_EXPIRED，
+            # 加入动作永远轮不到执行。正确顺序：直接 ImportChatInvite（它本身就返回群实体）。
             try:
                 res = await client(ImportChatInviteRequest(invite_hash))
-                # 关键：ChatInvite 无 chat 字段，旧代码取 getattr(check,'chat') 永远为 None，
-                # 导致实体丢失、回退去重复解析已失效的一次性邀请链接（报 expired）。
-                ent = _entity_from_updates(res) or await _find_dialog_by_title(client, title)
-                if ent:
-                    await _save_group_info(client, ent)
-                log.info(f"[加群] ✅ 成功加入「{title}」 entity={'有' if ent else '无'}")
-                return (f"✅ 已成功加入「{title}」", ent)
+            except InviteRequestSentError:
+                t = await _peek_invite_title(client, invite_hash)
+                log.info(f"[加群] 「{t}」需群主批准，申请已发送")
+                return (f"⏳ 已向「{t or '该群'}」发送入群申请，等待群主批准", None)
             except UserAlreadyParticipantError:
-                ent = await _find_dialog_by_title(client, title)
+                t = await _peek_invite_title(client, invite_hash)
+                ent = await _find_dialog_by_title(client, t)
                 if ent:
                     await _save_group_info(client, ent)
-                return (f"✅ 已在「{title}」中", ent)
+                return (f"✅ 已在「{t or '该群'}」中", ent)
+            except (InviteHashExpiredError, InviteHashInvalidError) as e:
+                log.warning(f"[加群] ImportChatInvite 报 {type(e).__name__} "
+                            f"hash={invite_hash} {_decode_invite_hash(invite_hash)}", exc_info=True)
+                kind = "已过期" if isinstance(e, InviteHashExpiredError) else "无效"
+                return (f"❌ 加入失败：Telegram 判定该邀请链接{kind}（{type(e).__name__}）\n"
+                        f"💡 如果是刚生成的链接还报这个，通常是：链接设了有效期/次数已用完，\n"
+                        f"   或该账号被 Telegram 限制加入新群（新号/风控）。\n"
+                        f"✔ 可换另一个账号重试，或让群主直接「添加成员」把账号拉进群。", None)
+            ent = _entity_from_updates(res)
+            t = getattr(ent, "title", None)
+            if ent is None:
+                t = await _peek_invite_title(client, invite_hash)
+                ent = await _find_dialog_by_title(client, t)
+            if ent:
+                await _save_group_info(client, ent)
+            log.info(f"[加群] ✅ ImportChatInvite 成功 title={t} entity={'有' if ent else '无'}")
+            return (f"✅ 已成功加入「{t or '群'}」", ent)
         elif pub_m:
             token = pub_m.group(1)
             try:
