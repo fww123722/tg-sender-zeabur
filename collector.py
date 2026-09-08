@@ -13,10 +13,13 @@ from telethon.errors import (
     InviteRequestSentError,
     UserAlreadyParticipantError,
 )
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.messages import (
+    CheckChatInviteRequest, ImportChatInviteRequest, DeleteChatUserRequest,
+)
 from telethon.tl.types import (
     Channel, Chat, ChatInvite, ChatInviteAlready, User,
+    PeerUser,
     UserStatusOnline, UserStatusOffline, UserStatusRecently,
     UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty,
 )
@@ -243,6 +246,38 @@ async def list_my_groups(client=None):
         mc = f"  成员:{member_count}" if member_count else ""
         result.append(f"• {title or '(无标题)'}  (id={gid}){uname}{mc}")
     return "\n".join(result)
+
+
+async def leave_group(accounts, gid):
+    """让所有在该群里的账号退出该群（不碰数据库）。
+
+    basic 群(Chat) 走 messages.deleteChatUser(把自己踢出)，频道/超级群(Channel) 走 channels.leaveChannel。
+    accounts 为 (acc_no, client, phone) 列表。返回 (退出成功数, 明细文本列表)。
+    """
+    lines = []
+    for acc_no, client, _ph in accounts:
+        try:
+            entity = await _resolve_entity(client, gid)
+        except Exception:
+            lines.append(f"  [账号{acc_no}] ⏭ 不在这个群里，跳过")
+            continue
+        try:
+            if isinstance(entity, Channel):
+                await client(LeaveChannelRequest(entity))
+            elif isinstance(entity, Chat):
+                me = await client.get_me()
+                await client(DeleteChatUserRequest(abs(int(entity.id)), PeerUser(int(me.id))))
+            else:
+                lines.append(f"  [账号{acc_no}] ❌ 不是群/频道（{type(entity).__name__}），跳过")
+                continue
+            lines.append(f"  [账号{acc_no}] ✅ 已退出「{getattr(entity, 'title', gid)}」")
+        except FloodWaitError as e:
+            lines.append(f"  [账号{acc_no}] ⏳ 退群频率限制，需等 {e.seconds}s")
+        except Exception as e:
+            lines.append(f"  [账号{acc_no}] ❌ {str(e)[:60]}")
+        await asyncio.sleep(1.5)
+    ok = sum(1 for x in lines if "✅" in x)
+    return ok, lines
 
 
 async def diag_groups(accounts):

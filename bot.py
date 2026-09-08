@@ -20,7 +20,7 @@ from db import (
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
-    collect_channel_history, diag_groups,
+    collect_channel_history, diag_groups, leave_group,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
@@ -34,7 +34,7 @@ from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_menu_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
-    group_pick_kb, group_del_kb, profile_menu_kb,
+    group_pick_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
 )
@@ -340,8 +340,44 @@ def register_handlers(bot, accounts):
                 return
             state["del_group_map"] = {str(i): g for i, g in enumerate(groups, 1)}
             await _reply(event,
-                "🗑 点选要删除的群（仅删除 Bot 记录，不会退出 Telegram 群）：",
+                "🗑 点选要删除的群（会先让在群里的账号退出该群，再删 Bot 记录）：",
                 buttons=group_del_kb(groups))
+        elif action == "del_confirm":
+            pend = state.get("pending_del_group")
+            if not pend:
+                await _reply(event, "⚠️ 没有待确认的删除，请重新点「🗑 删除群」。", buttons=groups_menu_kb())
+                return
+            gid, title = pend
+            state["pending_del_group"] = None
+            if _no_accounts(event):
+                return
+            if state["busy"]:
+                await _reply(event, "⏳ 正在执行其他任务，请稍后再试。", buttons=groups_menu_kb())
+                return
+            state["busy"] = True
+            try:
+                await _reply(event, f"🚪 正在让账号退出「{title}」…")
+                _ok_n, lines = await leave_group(accounts, gid)
+                deleted = db_delete_group(gid)
+            finally:
+                state["busy"] = False
+            remain = db_get_all_groups()
+            state["del_group_map"] = {str(i): gg for i, gg in enumerate(remain, 1)}
+            msg = (f"🗑 删除「{title}」(id={gid}) 完成：\n"
+                   + "\n".join(lines)
+                   + f"\n{'✅ Bot 记录已删除' if deleted else 'ℹ️ Bot 记录本就不存在'}"
+                   + f"\n剩余 {len(remain)} 个群。")
+            if not remain:
+                msg += "\n表已清空，返回群管理。"
+                await _reply(event, msg, buttons=groups_menu_kb())
+            else:
+                await _reply(event, msg, buttons=group_del_kb(remain))
+        elif action == "del_cancel":
+            state["pending_del_group"] = None
+            groups = db_get_all_groups()
+            state["del_group_map"] = {str(i): g for i, g in enumerate(groups, 1)}
+            await _reply(event, "↩️ 已取消删除。",
+                         buttons=group_del_kb(groups) if groups else groups_menu_kb())
         elif action == "acc_list":
             await _acc_list(event, accounts)
         elif action == "acc_filter":
@@ -437,7 +473,7 @@ def register_handlers(bot, accounts):
             await _campaign_group_chosen(event, accounts, pick_no)
             return
 
-        # 1.3 删除群按钮 → 删记录并刷新列表
+        # 1.3 删除群按钮 → 二次确认（退群+删记录）
         m_del = re.match(r"^🗑 (\d+)·", text)
         if m_del:
             g = (state.get("del_group_map") or {}).get(m_del.group(1))
@@ -445,17 +481,14 @@ def register_handlers(bot, accounts):
                 await _reply(event, "⚠️ 列表已过期，请重新点「🗑 删除群」。", buttons=groups_menu_kb())
                 return
             gid, title = g[0], g[1] or g[2] or str(g[0])
-            if db_delete_group(gid):
-                remain = db_get_all_groups()
-                state["del_group_map"] = {str(i): gg for i, gg in enumerate(remain, 1)}
-                msg = f"🗑 已删除群「{title}」(id={gid}) 的记录。\n剩余 {len(remain)} 个群。"
-                kb = group_del_kb(remain) if remain else groups_menu_kb()
-                if not remain:
-                    msg += "\n表已清空，返回群管理。"
-                    kb = groups_menu_kb()
-                await _reply(event, msg, buttons=kb)
-            else:
-                await _reply(event, "⚠️ 该记录已不存在，请重新点「🗑 删除群」。", buttons=groups_menu_kb())
+            state["pending_del_group"] = (gid, title)
+            await _reply(event,
+                f"⚠️ 确认删除群「{title}」(id={gid})？\n\n"
+                "将执行：\n"
+                "  1) 让所有在该群的账号退出该群\n"
+                "  2) 删除 Bot 表里的群记录\n\n"
+                "退群不可逆（需重新加群才能回来）。点「⚠️ 确认退群并删除」执行，点「↩️ 取消」返回。",
+                buttons=group_del_confirm_kb())
             return
 
         # 2. 数字快捷选群（从「我的群」返回的群序号，预留）

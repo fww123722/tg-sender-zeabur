@@ -28,6 +28,8 @@ BTN = {
     "add_group": "加群",
     "batch_import": "批量导入",
     "del_group": "🗑 删除群",
+    "del_confirm": "⚠️ 确认退群并删除",
+    "del_cancel": "↩️ 取消",
     # 账号管理子菜单
     "acc_list": "账号列表",
     "acc_add": "添加账号",
@@ -79,6 +81,8 @@ BTN_ACTION = {
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
     BTN["del_group"]: "del_group_menu",
+    BTN["del_confirm"]: "del_confirm",
+    BTN["del_cancel"]: "del_cancel",
     BTN["acc_list"]: "acc_list",
     BTN["acc_add"]: "acc_add_prompt",
     BTN["acc_edit_profile"]: "profile_menu",
@@ -194,6 +198,14 @@ def group_del_kb(groups):
         rows.append((f"🗑 {i}·{title}",))
     rows.append((BTN["back_groups"],))
     return _kb(rows)
+
+
+def group_del_confirm_kb():
+    """删除群二次确认键盘。"""
+    return _kb([
+        (BTN["del_confirm"],),
+        (BTN["del_cancel"],),
+    ])
 
 
 def accounts_menu_kb():
