@@ -296,13 +296,25 @@ def settings_menu_kb():
 
 
 def dashboard_menu_kb():
-    """数据看板：刷新 + 返回"""
+    """（旧回复键盘，已被 dashboard_inline_kb 取代，保留兼容）"""
     return _kb([
         (BTN["refresh"],),
         (BTN["back"],),
     ])
 
 
+def dashboard_inline_kb(show_accounts=False):
+    """看板内联键盘：「每人统计」↔「账号明细」互切 + 刷新 + 返回主菜单。
+    返回 rows 列表（每项是一行 Button），可直接传给 send_message/edit 的 buttons。"""
+    if show_accounts:
+        toggle = Button.inline("👤 每人统计", b"db:who")
+    else:
+        toggle = Button.inline("📇 账号明细", b"db:acc")
+    return [
+        [toggle],
+        [Button.inline(BTN["refresh"], b"db:ref"),
+         Button.inline(BTN["back"], b"db:home")],
+    ]
 def report_menu_kb():
     """举报菜单：三种模式 + 状态 + 返回主菜单"""
     return _kb([

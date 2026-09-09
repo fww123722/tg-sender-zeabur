@@ -43,7 +43,7 @@ from ops_state import (
 from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
-    settings_inline_kb, dashboard_menu_kb, report_menu_kb, reason_menu_kb,
+    settings_inline_kb, dashboard_menu_kb, dashboard_inline_kb, report_menu_kb, reason_menu_kb,
     group_pick_inline_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
@@ -786,6 +786,8 @@ def register_handlers(bot, accounts):
                     await event.answer("\u26d4 \u65e0\u6743\u9650", alert=True)
                     return
                 await _cb_settings(event, data[3:])
+            elif data.startswith("db:"):
+                await _cb_dashboard(event, data[3:])
             elif data.startswith("gp:"):
                 await _cb_grouppick(event, data[3:])
             else:
@@ -968,35 +970,62 @@ def register_handlers(bot, accounts):
                 buttons=_settings_kb())
 
     # ---------- 数据看板 ----------
-    async def _dashboard(event):
+    DASH_MODE = {}  # {chat_id: bool} False=每人统计 True=账号明细
+
+    async def _dashboard(event, show_accounts=False, edit=False):
         sent = db_sent_global()
         lines = [
-            "📊 数据看板",
-            f"• 名单: {db_count_targets()} 人",
+            "\U0001f4ca 数据看板",
             f"• 已发(去重): {sent} 人",
-            f"• 待发送: {max(0, db_count_targets() - sent)} 人",
             f"• 文案池: {db_count_pool()} 条",
             f"• 已加群: {db_group_count()} 个",
             f"• 在线账号: {len(accounts)} 个",
             "—",
-            "各账号今日/累计：",
         ]
-        for acc_no, client, _ph in accounts:
-            s = db_load_stats(acc_no)
-            lines.append(f"  [{acc_no}] 今日 {s['sent_today']} | 累计 {s['total_sent']}")
-        rows = db_campaign_leaderboard(7)
-        if rows:
-            lines.append("\u2014")
-            lines.append("\u8fd1 7 \u5929\u6309\u4eba\uff08\u4efb\u52a1\u6570 | \u53d1\u51fa | \u540d\u5355\uff09\uff1a")
-            for r_uid, r_name, n_task, n_sent, n_target in rows:
-                who = (r_name or actor_name(r_uid)) + ("(\u4e3b\u4eba)" if r_uid == OWNER_ID else "")
-                lines.append(f"  \u2022 {who}: {n_task} \u6b21 | {n_sent} \u53d1\u51fa | {n_target} \u540d\u5355")
+        if show_accounts:
+            lines.append("各账号明细（今日/累计）：")
+            for acc_no, client, _ph in accounts:
+                s = db_load_stats(acc_no)
+                lines.append(f"  [{acc_no}] 今日 {s['sent_today']} | 累计 {s['total_sent']}")
+        else:
+            lines.append("每个人的操作（近 7 天：任务数 | 发出）：")
+            rows = db_campaign_leaderboard(7)
+            if rows:
+                for r_uid, r_name, n_task, n_sent, n_target in rows:
+                    who = (r_name or actor_name(r_uid)) + ("（主人）" if r_uid == OWNER_ID else "")
+                    lines.append(f"  • {who}: {n_task} 次 | {n_sent} 发出")
+            else:
+                lines.append("  （近 7 天还没有群发记录）")
         cl = get_list_claim()
         if cl:
-            lines.append(f"\U0001f512 \u540d\u5355\u5360\u7528\uff1a{cl.get('name')}\uff08{cl.get('group') or '-'}\uff09")
+            lines.append(f"\U0001f512 名单占用：{cl.get('name')}（{cl.get('group') or '-'}）")
         if is_authorized(event.sender_id):
-            lines.append(f"\U0001f465 \u64cd\u4f5c\u5458 {len(OPERATORS)} \u4eba\uff08/oplist\uff09\uff1b\u5ba1\u8ba1\uff1a/oplog")
-        await _reply(event, "\n".join(lines), buttons=dashboard_menu_kb())
+            lines.append(f"\U0001f465 操作员 {len(OPERATORS)} 人（/oplist）；审计：/oplog")
+        text = "\n".join(lines)
+        kb = dashboard_inline_kb(show_accounts)
+        if edit:
+            await event.edit(text, buttons=kb)
+        else:
+            DASH_MODE[event.chat_id] = show_accounts
+            await _reply(event, text, buttons=kb)
+
+    async def _cb_dashboard(event, rest):
+        """看板内联按钮：db:acc 账号明细 / db:who 每人统计 / db:ref 刷新 / db:home 返回"""
+        chat = event.chat_id
+        mode = DASH_MODE.get(chat, False)
+        if rest == "home":
+            await event.answer()
+            await _push_main_menu(event)
+            return
+        if rest == "acc":
+            mode = True
+        elif rest == "who":
+            mode = False
+        elif rest == "ref":
+            pass  # 保持当前模式重新渲染
+        DASH_MODE[chat] = mode
+        await _dashboard(event, show_accounts=mode, edit=True)
+        await event.answer()
 
     async def _acc_list(event, accounts):
         if not accounts:
