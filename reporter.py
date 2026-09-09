@@ -432,9 +432,13 @@ async def _maybe_sleep(i, total, status_cb, results, label, keyed=False):
         await asyncio.sleep(random.uniform(10, 30))
     done = i + 1
     if done % REPORT_REFRESH_EVERY == 0 or done == total:
-        live = [f'[{a}] → {r}' for a, r in results[-10:]]
+        # results 元素：user/custom 模式是 2 元组 (acc_no, res)，
+        # super 模式（keyed=True）是 3 元组 (acc_no, reason_key, res)。
+        # 曾经无条件按 2 元组解包 → super 模式必崩 ValueError: too many values to unpack
         if keyed:
             live = [f'[{a}] [{REASON_CN.get(k, k)}] → {r}' for a, k, r in results[-10:]]
+        else:
+            live = [f'[{a}] → {r}' for a, r in results[-10:]]
         if len(results) > 10:
             live.insert(0, f'... ({len(results) - 10} 已完成)')
         if status_cb:
