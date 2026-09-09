@@ -61,15 +61,15 @@ REASON_TEXT_TO_KEY = {v[0]: k for k, v in REPORT_REASONS.items()}
 pending_action = {}
 
 # ---- 多人共管权限（老板要求：操作员全部开放） ----
-# 主人与操作员同权。唯一留给主人的是「增删操作员」，
-# 否则操作员能自拉人扩权、甚至把主人踢出去。
+# admin与操作员同权。唯一留给admin的是「增删操作员」，
+# 否则操作员能自拉人扩权、甚至把admin踢出去。
 OWNER_EXCLUSIVE = {
     "menu_opadmin", "op_list", "op_log",
 }
 
 
 def can_do(cid, action) -> bool:
-    """主人与操作员同权；不在白名单的人永远 False。"""
+    """admin与操作员同权；不在白名单的人永远 False。"""
     if is_owner(cid):
         return True
     if not is_authorized(cid):
@@ -78,7 +78,7 @@ def can_do(cid, action) -> bool:
 
 
 def _owner_only_hint(event) -> str:
-    return ("⛔ 只有主人能增删操作员（白名单由主人独占，防止自行扩权）。"
+    return ("⛔ 只有admin能增删操作员（白名单由admin独占，防止自行扩权）。"
             "\n其他功能对你已全部开放。")
 
 
@@ -116,7 +116,7 @@ PARSE_LABEL = {None: "纯文本", "html": "HTML", "md": "Markdown"}
 #  多人共管：菜单按角色适配 + 审计
 # =====================================================================
 def _is_op(event) -> bool:
-    return False  # 全开：操作员与主人同一套键盘
+    return False  # 全开：操作员与admin同一套键盘
 
 
 def _main_kb(event):
@@ -164,7 +164,7 @@ def _busy_tip(event) -> str:
         return "⏳ 你自己刚发的任务还在跑，等它结束或先点「🛑 停止任务」。"
     mins = max(0, int((time.time() - (b.get("at") or time.time())) / 60))
     return (f"⏳ 正在执行任务，占用者：{name}（已 {mins} 分钟）。\n"
-            "号池是共用的，得等它跑完；紧急情况可让主人点「🛑 停止任务」。")
+            "号池是共用的，得等它跑完；紧急情况可让admin点「🛑 停止任务」。")
 
 
 def _settings_kb():
@@ -184,7 +184,7 @@ async def _push_main_menu(event):
     sent = db_sent_global()
     b = state.get("busy_by") or {}
     text = main_menu_text(
-        ACTIVE_ACCOUNTS, db_group_count(), db_count_targets(),
+        ACTIVE_ACCOUNTS, db_group_count(),
         sent, db_count_pool(), state["busy"],
         role="owner" if is_owner(event.sender_id) else "operator",
         name=actor_name(event.sender_id),
@@ -213,7 +213,7 @@ def register_handlers(bot, accounts):
         return uid, actor_name(uid)
 
     def _guard_owner(event):
-        """owner-only 入口守卫：非主人回提示。"""
+        """owner-only 入口守卫：非admin回提示。"""
         if is_owner(event.sender_id):
             return True
         asyncio.ensure_future(_reply(event, _owner_only_hint(event)))
@@ -233,11 +233,11 @@ def register_handlers(bot, accounts):
             return
         await _push_main_menu(event)
 
-    # ---------- 管理员：操作员白名单（仅主人） ----------
+    # ---------- 管理员：操作员白名单（仅admin） ----------
     @bot.on(events.NewMessage(pattern=r"^/addop\s+(\d+)(?:\s+([\s\S]+))?$"))
     async def on_addop(event):
         if not is_owner(event.sender_id):
-            await _reply(event, "⛔ 只有主人能增删操作员。")
+            await _reply(event, "⛔ 只有admin能增删操作员。")
             return
         uid = int(event.pattern_match.group(1))
         name = (event.pattern_match.group(2) or "").strip()
@@ -271,7 +271,7 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern=r"^/dropop\s+(\d+)$"))
     async def on_dropop(event):
         if not is_owner(event.sender_id):
-            await _reply(event, "⛔ 只有主人能增删操作员。")
+            await _reply(event, "⛔ 只有admin能增删操作员。")
             return
         uid = int(event.pattern_match.group(1))
         db_drop_operator(uid)
@@ -283,7 +283,7 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern="^/oplist$"))
     async def on_oplist(event):
         if not is_owner(event.sender_id):
-            await _reply(event, "⛔ 只有主人能看操作员名单。")
+            await _reply(event, "⛔ 只有admin能看操作员名单。")
             return
         lines = [f"👥 操作员白名单（{len(OPERATORS)} 人）"]
         for uid, name in sorted(OPERATORS.items(), key=lambda kv: kv[1]):
@@ -298,12 +298,12 @@ def register_handlers(bot, accounts):
     @bot.on(events.NewMessage(pattern="^/whoami$"))
     async def on_whoami(event):
         uid = event.sender_id
-        role = "主人" if is_owner(uid) else ("操作员" if is_authorized(uid) else "未授权")
+        role = "admin" if is_owner(uid) else ("操作员" if is_authorized(uid) else "未授权")
         await _reply(event, f"你的 user_id: {uid}\n状态: {role}")
 
     @bot.on(events.NewMessage(pattern=r"^/oplog(?:\s+(\d+))?$"))
     async def on_oplog(event):
-        """最近操作审计（主人看全量，操作员只看自己）。"""
+        """最近操作审计（已全开：admin 和操作员都看全量）。"""
         if not is_authorized(event.sender_id):
             return
         try:
@@ -326,6 +326,8 @@ def register_handlers(bot, accounts):
         lines = ["📜 操作审计（近 %d 条）" % n if not only_self else "📜 我的操作记录（近 7 天）"]
         for r in rows:
             name, r_uid, action, detail, ts = r
+            if r_uid == OWNER_ID:
+                name = "admin"  # 审计历史行可能存着旧称谓，按 uid 归一
             t = ts.strftime("%m-%d %H:%M") if hasattr(ts, "strftime") else ""
             lines.append(f"  {t} {name}({r_uid}) {action} {(detail or '')[:60]}".rstrip())
         await _reply(event, "\n".join(lines))
@@ -335,7 +337,7 @@ def register_handlers(bot, accounts):
     async def on_stats(event):
         if not is_authorized(event.sender_id):
             return
-        lines = [f"📊 名单: {db_count_targets()} | 已发(去重): {db_sent_global()} | 文案池: {db_count_pool()}"]
+        lines = [f"📊 已发(去重): {db_sent_global()} | 文案池: {db_count_pool()}"]
         for acc_no, client, _ph in accounts:
             s = db_load_stats(acc_no)
             lines.append(f"• [{acc_no}] 今日{s['sent_today']} 累计{s['total_sent']}")
@@ -973,6 +975,11 @@ def register_handlers(bot, accounts):
     DASH_MODE = {}  # {chat_id: bool} False=每人统计 True=账号明细
 
     async def _dashboard(event, show_accounts=False, edit=False):
+        # OWNER_ID 对外统一显示 admin；DB 历史行可能存旧称谓，按 uid 强制归一
+        def _disp(uid, r_name=""):
+            if uid == OWNER_ID:
+                return "admin"
+            return r_name or actor_name(uid)
         sent = db_sent_global()
         lines = [
             "\U0001f4ca 数据看板",
@@ -992,7 +999,7 @@ def register_handlers(bot, accounts):
             rows = db_campaign_leaderboard(7)
             if rows:
                 for r_uid, r_name, n_task, n_sent, n_target in rows:
-                    who = (r_name or actor_name(r_uid)) + ("（主人）" if r_uid == OWNER_ID else "")
+                    who = _disp(r_uid, r_name)
                     lines.append(f"  • {who}: {n_task} 次 | {n_sent} 发出")
             else:
                 lines.append("  （近 7 天还没有群发记录）")
@@ -1090,7 +1097,7 @@ def register_handlers(bot, accounts):
                 f"⛔ 名单正被 {holder.get('name') or '其他人'} 占用"
                 f"（{holder.get('group') or '未选群'}）。\n"
                 "名单全库只有一份，重新选群会清掉对方的名单，所以只能排队。\n"
-                "等对方跑完，或 30 分钟后自动解锁；紧急情况找主人点「🛑 停止任务」。",
+                "等对方跑完，或 30 分钟后自动解锁；紧急情况找admin点「🛑 停止任务」。",
                 buttons=campaign_menu_kb())
             return
         _set_busy(uid)

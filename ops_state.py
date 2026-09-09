@@ -6,7 +6,7 @@ qfbot 桌面板是本地状态；TG 端是服务端无状态，所以必须把�
 这样随时回来点开都能接着上次的进度，不用重新走。
 
 多人共管：campaign 按发起人 uid 分键存放（campaign_by_actor），
-主人和每个操作员各有自己一份「选群/文案」草稿，互不覆盖。
+admin和每个操作员各有自己一份「选群/文案」草稿，互不覆盖。
 旧数据（单一 campaign）会自动归到 owner 名下，不丢进度。
 """
 import json
@@ -168,7 +168,7 @@ def touch_list(uid):
 
 
 def release_list(uid=None):
-    """释放名单；uid 为 None 时无条件释放（主人可用「停止任务」解锁）。"""
+    """释放名单；uid 为 None 时无条件释放（admin可用「停止任务」解锁）。"""
     cur = get_list_claim()
     if uid is None or not cur or str(cur.get("uid")) == str(uid):
         set(K_LIST_CLAIM, None)

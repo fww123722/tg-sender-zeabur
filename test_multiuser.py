@@ -5,7 +5,7 @@
 跑法（项目目录下）：
     python test_multiuser.py
 覆盖：
-  A 权限矩阵（主人/操作员/陌生人 × 42 个按钮动作）
+  A 权限矩阵（admin/操作员/陌生人 × 42 个按钮动作）
   B ops_state 草稿按人隔离 + 名单占用锁（先到先用/续租/超龄/强制解锁）
   C handler 级真实路径（陌生人被拒、操作员看不到高危按钮、删群三段流程）
   D 群发协程崩溃时必须释放号池锁与名单锁（否则同事被干锁 30 分钟）
@@ -275,7 +275,7 @@ def section_c():
     out = run_handler("on_addop", FakeEvent(ALICE))
     check("A /addop still owner-only", H.get("on_addop") is not None and True)
 
-    # 删群三段流程（主人）
+    # 删群三段流程（admin）
     # \u5220\u7fa4\u6d41\u7a0b\uff1a\u73b0\u5728\u64cd\u4f5c\u5458\u4e5f\u80fd\u8d70\u901a
     run_handler("on_any_text", FakeEvent(ALICE, BTN["del_group"]))
     out = run_handler("on_any_text", FakeEvent(ALICE, "\U0001f5d1 1\u00b7\u7fa4A"))

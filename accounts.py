@@ -304,7 +304,7 @@ async def _register_zip_receiver(bot):
             if err:
                 await event.client.send_message(event.chat_id, f"❌ 解压失败: {err}")
                 return
-            config.set_notify(event.sender_id)  # 后续热替换进度发给他，不扰主人
+            config.set_notify(event.sender_id)  # 后续热替换进度发给他，不扰admin
             ZIP_RECEIVED.set()
             await event.client.send_message(event.chat_id, f"✅ 已解压 {cnt} 个 session 文件。正在重新加载…")
         except Exception as e:

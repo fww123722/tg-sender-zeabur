@@ -119,7 +119,7 @@ logging.basicConfig(
 log = logging.getLogger("tg_sender")
 
 # =====================================================================
-#  多人使用：角色判定（owner = 主人，operator = 被授权的操作员）
+#  多人使用：角色判定（owner = admin，operator = 被授权的操作员）
 #  白名单存在 PostgreSQL operators 表，OPERATORS 是它的内存缓存，
 #  启动时由 main.py 载入，/addop /dropop 实时同步。
 # =====================================================================
@@ -165,14 +165,14 @@ def is_authorized(uid) -> bool:
 
 # =====================================================================
 #  进行中操作的汇报去向
-#  默认发主人；谁发起了 session 热替换/批量加载，
-#  就临时改发给谁，避免操作者的进度消息全灌进主人聊天。
+#  默认发admin；谁发起了 session 热替换/批量加载，
+#  就临时改发给谁，避免操作者的进度消息全灌进admin聊天。
 # =====================================================================
 NOTIFY_UID = OWNER_ID
 
 
 def set_notify(uid):
-    """把汇报临时指向发起人；传 None/0 回落到主人。"""
+    """把汇报临时指向发起人；传 None/0 回落到admin。"""
     global NOTIFY_UID
     try:
         NOTIFY_UID = int(uid) if uid else OWNER_ID
@@ -187,8 +187,12 @@ def get_notify():
 
 def actor_name(uid) -> str:
     if is_owner(uid):
-        return "主人"
-    return OPERATORS.get(uid) or f"user{uid}"
+        return "admin"
+    name = (OPERATORS.get(uid) or f"user{uid}").strip()
+    # 兼容旧数据：以前把 owner 备注名填成旧称谓时，拼上角色前缀会重复
+    if name in ("admin", "\u4e3b\u4eba", "owner", "Owner", "OWNER"):
+        return "admin"
+    return name
 
 # =====================================================================
 #  全局状态

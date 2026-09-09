@@ -17,12 +17,13 @@ from accounts import _find_session, _register_zip_receiver
 from bot import register_handlers
 
 
-async def load_accounts(bot, notify=None):
+async def load_accounts(bot, notify=None, quiet_ok=True):
     """从 PostgreSQL 扫描所有已保存的 tg_session_* 加载账号，返回 (ready, failed)。
+    quiet_ok=True（默认）时不逐账号发成功回执，避免每次部署刷屏；失败仍会发。
     账号全部通过 Bot 对话登录并持久化到 DB；重启后自动恢复，无需环境变量预设手机号。"""
     ready = []
     failed = []
-    to = notify or OWNER_ID   # 启动期给主人；由上传触发时给发起人
+    to = notify or OWNER_ID   # 启动期给admin；由上传触发时给发起人
     acc_nos = DB.list_sessions("tg_session_")
     if not acc_nos:
         return ready, failed
@@ -49,12 +50,13 @@ async def load_accounts(bot, notify=None):
                 DB.save_session("tg_session_%d" % acc_no, client.session.save())
             except Exception as exc:
                 log.warning("⚠️ 保存 session 到 PostgreSQL 失败: %s", exc)
-            try:
-                await bot.send_message(
-                    to, f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})"
-                )
-            except Exception:
-                pass
+            if not quiet_ok:
+                try:
+                    await bot.send_message(
+                        to, f"✅ [账号{acc_no}] 已加载 session: {me.first_name} (@{me.username})"
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             failed.append(acc_no)
             log.error(f"❌ [账号{acc_no}] 加载 session 失败: {e}")
@@ -150,7 +152,7 @@ async def main():
                 continue
             ZIP_RECEIVED.clear()
             log.info("📦 已收到 session 压缩包，尝试重新加载…")
-            ready, failed = await load_accounts(bot, get_notify())
+            ready, failed = await load_accounts(bot, get_notify(), quiet_ok=False)
             ACTIVE_ACCOUNTS.clear()
             ACTIVE_ACCOUNTS.extend(ready)
 
@@ -228,7 +230,7 @@ async def main():
                 except Exception:
                     pass
 
-            set_notify(None)  # 操作已汇报完，后续系统消息回归主人
+            set_notify(None)  # 操作已汇报完，后续系统消息回归admin
     # 运行所有组件
     tasks = [bot.run_until_disconnected(), hot_reload_watcher()]
     for acc_no, client, phone in ready:

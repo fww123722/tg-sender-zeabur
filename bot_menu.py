@@ -158,8 +158,8 @@ def _kb(rows):
 def main_menu_kb(is_operator: bool = False):
     """主菜单。
 
-    主人：3×2（群发/群管理/账号 + 看板/设置/举报）
-    操作员与主人同权（老板要求全开），两者渲染同一套键盘。
+    admin：3×2（群发/群管理/账号 + 看板/设置/举报）
+    操作员与admin同权（老板要求全开），两者渲染同一套键盘。
     """
     if is_operator:
         return _kb([
@@ -338,20 +338,24 @@ def reason_menu_kb():
 # =====================================================================
 #  各菜单文本
 # =====================================================================
-def main_menu_text(accounts, groups_count, targets_count, sent_count, pool_count, busy: bool,
+def main_menu_text(accounts, groups_count, sent_count, pool_count, busy: bool,
                    role: str = "owner", name: str = "", busy_tip: str = ""):
     """主菜单文本，含实时数据摘要。多人使用时标出当前身份。"""
-    head = f"📋 控制面板｜{('主人：' + name) if role == 'owner' else ('操作员：' + name)}\n\n" if name else "📋 控制面板\n\n"
+    # actor_name(owner) 已返回 admin，不拼前缀以免「admin：admin」
+    if role == "owner":
+        tag = name or "admin"
+    else:
+        tag = ("操作员：" + name) if name else "操作员"
+    head = f"📋 控制面板｜{tag}\n\n"
     lock = f"\n🔒 当前占用：{busy_tip}\n" if busy and busy_tip else ""
     return (
         head +
         f"👤 账号: {len(accounts)} 个在线 | "
-        f"📁 群组: {groups_count} 个\n"
-        f"📋 名单: {targets_count} 人 | "
-        f"已发(去重): {sent_count} 人\n"
+        f"📁 群组: {groups_count} 个 | "
+        f"📨 已发(去重): {sent_count} 人\n"
         f"📝 文案池: {pool_count} 条\n"
         f"{'⏳ 正在执行任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
-        + ("" if role == "owner" else "ℹ️ 你是操作员：功能已全部开放，只有增删操作员需找主人。\n")
+        + ("" if role == "owner" else "ℹ️ 你是操作员：功能已全部开放，只有增删操作员需找admin。\n")
         + "请选择功能："
     )
 
