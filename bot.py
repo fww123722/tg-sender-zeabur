@@ -8,6 +8,7 @@
 进度、选中的群、文案等持久化到 DB（ops_state），下次回来接着继续。
 """
 import asyncio
+import os
 import re
 import time
 
@@ -91,15 +92,58 @@ async def _reply(event, text, buttons=None):
         return None
 
 
+# 原地编辑节流：Telegram 对 editMessageText 有频控，连续编辑同一条太快会 FLOOD_WAIT。
+# 旧代码把编辑异常（包括限流）直接吞掉后退化成「发新消息」，所以进度看起来每条都是新发的。
+EDIT_MIN_INTERVAL = float(os.environ.get("EDIT_MIN_INTERVAL", "1.2"))
+_edit_last = {}
+
+
+async def _throttle_edit(tag):
+    """同一条消息两次编辑之间拉开 EDIT_MIN_INTERVAL，从源头避免限流。"""
+    now = time.time()
+    delta = EDIT_MIN_INTERVAL - (now - _edit_last.get(tag, 0.0))
+    if delta > 0:
+        await asyncio.sleep(delta)
+    _edit_last[tag] = time.time()
+
+
 async def _edit_or_send(msg, event, text, buttons=None):
     """能改旧消息就不新发（老板：不要额外发消息）。
-    buttons 省略时保留原键盘（Telethon edit 的 buttons 默认 NOT_SET，显式传 None 会清空）。"""
-    if msg is not None:
+
+    编辑失败时的顺位：限流→等一会重试 → 换 client.edit_message 再试 → 才允许新发。
+    buttons 省略时保留原键盘（Telethon edit 的 buttons 默认 NOT_SET，显式传 None 会清空）。
+    """
+    if msg is None:
+        return await _reply(event, text, buttons=buttons)
+
+    tag = getattr(msg, "id", None) or "anon"
+    for _attempt in range(4):
+        await _throttle_edit(tag)
         try:
             return await (msg.edit(text) if buttons is None else msg.edit(text, buttons=buttons))
         except Exception as e:
-            if "not modified" in str(e).lower():
+            low = str(e).lower()
+            if "not modified" in low or "message_not_modified" in low:
                 return msg
+            secs = getattr(e, "seconds", None)
+            flooded = (secs is not None) or ("flood" in low) or ("try again later" in low) \
+                or ("slowdown" in low) or ("rate" in low)
+            if flooded:
+                # Telegram 频控：等一会接着改同一条，绝不因此发新消息
+                await asyncio.sleep(min(int(secs or 0) or 2, 6))
+                continue
+            log.warning(f"[ui] 原地编辑失败({type(e).__name__})，尝试兜底：{str(e)[:160]}")
+            break
+
+    # 兜底：换 client.edit_message 再试一次（msg.edit 在部分场景不可用）
+    cid = getattr(event, "chat_id", None) or getattr(msg, "chat_id", None)
+    mid = getattr(msg, "id", None)
+    if cid and mid:
+        try:
+            return await (event.client.edit_message(cid, mid, text) if buttons is None
+                          else event.client.edit_message(cid, mid, text, buttons=buttons))
+        except Exception as e:
+            log.warning(f"[ui] 兜底编辑也失败({type(e).__name__})，只能新发：{str(e)[:160]}")
     return await _reply(event, text, buttons=buttons)
 
 
