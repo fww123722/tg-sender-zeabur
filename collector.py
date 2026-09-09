@@ -247,6 +247,86 @@ def db_count_pool():
         DB.putconn(conn)
 
 
+# ---- 文案池手动管理（旧版只能 /collect_history 采集，菜单里根本没入口）----
+POOL_MANUAL = "manual"
+
+
+def db_add_pool_text(text):
+    """手动存一条文案，返回 id（毫秒时间戳，天然不撞且按时间有序）。"""
+    import time as _t
+    mid = int(_t.time() * 1000)
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO messages_pool (source, msg_id, text, has_media) "
+                "VALUES (%s, %s, %s, FALSE)",
+                (POOL_MANUAL, mid, text),
+            )
+        conn.commit()
+        return mid
+    finally:
+        DB.putconn(conn)
+
+
+def db_list_pool(limit=30):
+    """列文案池（采集的+手动的）：返回 [(source, msg_id, text)]，按时间正序。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, msg_id, text FROM messages_pool "
+                "ORDER BY msg_date NULLS LAST, source, msg_id LIMIT %s",
+                (int(limit),),
+            )
+            return cur.fetchall()
+    finally:
+        DB.putconn(conn)
+
+
+def db_del_pool(source, msg_id):
+    """删单条，返回是否真删了。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM messages_pool WHERE source = %s AND msg_id = %s",
+                        (source, int(msg_id)))
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
+    finally:
+        DB.putconn(conn)
+
+
+def db_clear_pool():
+    """清空文案池，返回清除条数。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM messages_pool")
+            n = cur.fetchone()[0]
+            cur.execute("DELETE FROM messages_pool")
+        conn.commit()
+        return n
+    finally:
+        DB.putconn(conn)
+
+
+def db_pool_texts(limit=500):
+    """取可用于群发的纯文本文案（排除带图/空的），带内容去重。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT text FROM messages_pool "
+                "WHERE has_media IS NOT TRUE AND COALESCE(text, '') <> '' LIMIT %s",
+                (int(limit),),
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        DB.putconn(conn)
+
+
 async def list_my_groups(client=None):
     """列出通过本 Bot 加入/导入的群/频道（数据源：DB groups_info 表，
     不遍历 Telegram 全部会话，避免把账号原有的群/私聊也列出来）。"""

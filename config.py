@@ -190,7 +190,7 @@ def actor_name(uid) -> str:
         return "admin"
     name = (OPERATORS.get(uid) or f"user{uid}").strip()
     # 兼容旧数据：以前把 owner 备注名填成旧称谓时，拼上角色前缀会重复
-    if name in ("admin", "\u4e3b\u4eba", "owner", "Owner", "OWNER"):
+    if name in ("admin", "主人", "owner", "Owner", "OWNER"):
         return "admin"
     return name
 

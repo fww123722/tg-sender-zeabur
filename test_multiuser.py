@@ -90,7 +90,7 @@ AUDIT = []
 DELETED = []
 FINISHED = []
 
-GROUPS = [(1001, "\u7fa4A", "grpA", 10, 1), (1002, "\u7fa4B", "grpB", 20, 1)]
+GROUPS = [(1001, "群A", "grpA", 10, 1), (1002, "群B", "grpB", 20, 1)]
 
 
 def stub_db():
@@ -121,7 +121,7 @@ async def _asyncher(*a, **k):
 
 
 async def _leave_stub(accounts, gid):
-    return (1, ["[\u8d26\u53f71] \u5df2\u9000\u51fa"])
+    return (1, ["[账号1] 已退出"])
 
 
 def stub_actions():
@@ -134,7 +134,7 @@ def stub_actions():
         for n in names:
             if hasattr(mod, n):
                 setattr(mod, n, _asyncher)
-    # leave_group \u8fd4\u56de\u7684\u662f\u5957\u751f\uff0c\u4e0d\u80fd\u7528\u901a\u7528\u6869
+    # leave_group 返回的是套生，不能用通用桩
     bot.leave_group = _leave_stub
 
 
@@ -174,9 +174,9 @@ def section_a():
     op_ok = {a for a in acts if bot.can_do(ALICE, a)}
     check("A owner can do every action", all(bot.can_do(OWNER, a) for a in acts))
     check("A stranger can do nothing", not any(bot.can_do(STRANGER, a) for a in acts))
-    # \u8001\u677f\u8981\u6c42\uff1a\u64cd\u4f5c\u5458\u4e0e\u4e3b\u4eba\u540c\u6743
+    # 老板要求：操作员与主人同权
     check("A operator has full access", op_ok == set(acts), )
-    # \u552f\u4e00\u4fdd\u7559\uff1a\u589e\u5220\u64cd\u4f5c\u5458
+    # 唯一保留：增删操作员
     check("A opadmin stays owner-only",
           all(bot.can_do(OWNER, a) and not bot.can_do(ALICE, a)
               for a in ("menu_opadmin", "op_list", "op_log")))
@@ -192,8 +192,8 @@ def section_a():
 # =====================================================================
 def section_b():
     STORE.clear()
-    O.set_campaign(ALICE, group="gA", group_title="A\u7fa4", text="\u6587\u6848A")
-    O.set_campaign(BOB, group="gB", group_title="B\u7fa4", text="\u6587\u6848B")
+    O.set_campaign(ALICE, group="gA", group_title="A群", text="文案A")
+    O.set_campaign(BOB, group="gB", group_title="B群", text="文案B")
     check("B drafts isolated per actor",
           O.get_campaign(ALICE)["group"] == "gA" and O.get_campaign(BOB)["group"] == "gB")
     O.clear_campaign(ALICE)
@@ -206,21 +206,21 @@ def section_b():
     check("B legacy campaign migrates to owner", O.get_campaign(OWNER).get("group") == "legacy")
 
     STORE.clear()
-    ok1, _ = O.claim_list(ALICE, "Alice", "A\u7fa4")
-    ok2, holder = O.claim_list(BOB, "Bob", "B\u7fa4")
-    ok3, _ = O.claim_list(OWNER, "\u4e3b\u4eba", "C\u7fa4")
+    ok1, _ = O.claim_list(ALICE, "Alice", "A群")
+    ok2, holder = O.claim_list(BOB, "Bob", "B群")
+    ok3, _ = O.claim_list(OWNER, "主人", "C群")
     check("B first claim wins", ok1 and not ok2 and not ok3)
     check("B holder is named", bool(holder) and holder.get("name") == "Alice")
-    ok_again, _ = O.claim_list(ALICE, "Alice", "A\u7fa4")
+    ok_again, _ = O.claim_list(ALICE, "Alice", "A群")
     check("B same actor can renew", ok_again)
     O.release_list(ALICE)
-    check("B release frees slot", O.claim_list(BOB, "Bob", "B\u7fa4")[0])
+    check("B release frees slot", O.claim_list(BOB, "Bob", "B群")[0])
     O.release_list(None)
-    O.claim_list(ALICE, "Alice", "A\u7fa4")
+    O.claim_list(ALICE, "Alice", "A群")
     d = json.loads(STORE["ops_state"])
     d["list_claim"]["at"] = int(_time.time()) - 31 * 60
     STORE["ops_state"] = json.dumps(d)
-    check("B stale claim auto-expires (30min)", O.claim_list(BOB, "Bob", "B\u7fa4")[0])
+    check("B stale claim auto-expires (30min)", O.claim_list(BOB, "Bob", "B群")[0])
 
 
 # =====================================================================
@@ -250,11 +250,11 @@ def section_c():
     H = fb.handlers
 
     out = run_handler("on_start", FakeEvent(STRANGER))
-    check("C stranger /start rejected", out and "\u65e0\u6743\u9650" in out[0])
+    check("C stranger /start rejected", out and "无权限" in out[0])
 
     out = run_handler("on_start", FakeEvent(ALICE))
     btns = flat_kb(KBS[0]) if KBS else []
-    check("C operator panel tagged", out and "Alice" in out[0] and "\u64cd\u4f5c\u5458" in out[0])
+    check("C operator panel tagged", out and "Alice" in out[0] and "操作员" in out[0])
     check("C operator kb now complete", len(btns) == 6 and all(
           BTN[x] in btns for x in ("accounts", "settings", "report")))
 
@@ -267,28 +267,28 @@ def section_c():
               "set_speed", "set_quota", "del_group", "rep_user", "rep_channel_ai",
               "rep_reason", "rep_status"):
         out = run_handler("on_any_text", FakeEvent(ALICE, BTN[k]))
-        allowed += 1 if not any("\u53ea\u6709\u4e3b\u4eba" in x for x in out) else 0
+        allowed += 1 if not any("只有主人" in x for x in out) else 0
     check(f"C operator NOT blocked on 13 ex-owner-only buttons ({allowed}/13)",
           allowed == 13)
 
-    # \u589e\u5220\u64cd\u4f5c\u5458\u4ecd\u7136\u53ea\u6709\u4e3b\u4eba\u80fd\u505a
+    # 增删操作员仍然只有主人能做
     out = run_handler("on_addop", FakeEvent(ALICE))
     check("A /addop still owner-only", H.get("on_addop") is not None and True)
 
     # 删群三段流程（admin）
-    # \u5220\u7fa4\u6d41\u7a0b\uff1a\u73b0\u5728\u64cd\u4f5c\u5458\u4e5f\u80fd\u8d70\u901a
+    # 删群流程：现在操作员也能走通
     run_handler("on_any_text", FakeEvent(ALICE, BTN["del_group"]))
-    out = run_handler("on_any_text", FakeEvent(ALICE, "\U0001f5d1 1\u00b7\u7fa4A"))
+    out = run_handler("on_any_text", FakeEvent(ALICE, "🗑 1·群A"))
     check("C operator del flow: confirm prompt",
-          out and "\u786e\u8ba4\u5220\u9664\u7fa4" in out[0])
+          out and "确认删除群" in out[0])
     out = run_handler("on_any_text", FakeEvent(ALICE, BTN["del_confirm"]))
     check("C operator del flow: executed",
-          DELETED == [1001] and "\u5220\u9664" in "\n".join(out))
+          DELETED == [1001] and "删除" in "\n".join(out))
     DELETED.clear()
 
-    # \u672a\u6388\u6743\u7684\u4eba\u4f2a\u9020\u70b9\u51fb\uff0c\u5fc5\u987b\u65e0\u6548
+    # 未授权的人伪造点击，必须无效
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_group"]))
-    run_handler("on_any_text", FakeEvent(STRANGER, "\U0001f5d1 1\u00b7\u7fa4A"))
+    run_handler("on_any_text", FakeEvent(STRANGER, "🗑 1·群A"))
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_confirm"]))
     check("C stranger cannot delete group", DELETED == [])
 
@@ -314,40 +314,40 @@ def section_d():
     async def sender_stub(*a, **k):
         if CRASH["on"]:
             raise RuntimeError("fake crash")
-        return "\u2705 \u7fa4\u53d1\u5b8c\u6210"
+        return "✅ 群发完成"
 
     bot.send_to_list_multi = sender_stub
     bot.main_menu_kb = lambda op=False: None
 
     async def main():
         STORE.clear()
-        O.set_campaign(ALICE, group="gA", group_title="\u7fa4A", text="\u6587\u6848")
-        O.claim_list(ALICE, "Alice", "\u7fa4A")
+        O.set_campaign(ALICE, group="gA", group_title="群A", text="文案")
+        O.claim_list(ALICE, "Alice", "群A")
         msgs = await drive_send(ALICE, BTN["camp_start"])
-        check("D crash: actor gets error not silence", any("\u5f02\u5e38\u4e2d\u65ad" in m for m in msgs))
+        check("D crash: actor gets error not silence", any("异常中断" in m for m in msgs))
         check("D crash: busy lock released", bot.state["busy"] is False)
         check("D crash: list claim released", O.get_list_claim() == {})
         check("D crash: campaign marked crashed", any(f[2] == "crashed" for f in FINISHED))
-        check("D crash: draft kept for retry", O.get_campaign(ALICE).get("text") == "\u6587\u6848")
-        check("D crash: next operator takes over at once", O.claim_list(BOB, "Bob", "B\u7fa4")[0])
+        check("D crash: draft kept for retry", O.get_campaign(ALICE).get("text") == "文案")
+        check("D crash: next operator takes over at once", O.claim_list(BOB, "Bob", "B群")[0])
 
         O.release_list(None)
         bot._clear_busy()
         FINISHED.clear()
         CRASH["on"] = False
-        O.set_campaign(BOB, group="gB", group_title="\u7fa4B", text="xx")
-        O.claim_list(BOB, "Bob", "\u7fa4B")
+        O.set_campaign(BOB, group="gB", group_title="群B", text="xx")
+        O.claim_list(BOB, "Bob", "群B")
         msgs = await drive_send(BOB, BTN["camp_start"])
-        check("D happy: result shown", any("\u7fa4\u53d1\u5b8c\u6210" in m for m in msgs))
+        check("D happy: result shown", any("群发完成" in m for m in msgs))
         check("D happy: status done", any(f[2] == "done" for f in FINISHED))
         check("D happy: draft cleared", O.get_campaign(BOB) == {})
         check("D happy: claim released", O.get_list_claim() == {})
 
-        O.claim_list(ALICE, "Alice", "\u7fa4A")
+        O.claim_list(ALICE, "Alice", "群A")
         bot._set_busy(ALICE)
         AUDIT.clear()
         m = await drive_send(BOB, BTN["stop"])
-        check("D anyone can stop another\u2019s task", bot.state["busy"] is False)
+        check("D anyone can stop another’s task", bot.state["busy"] is False)
         check("D stop releases list claim", O.get_list_claim() == {})
         check("D stop audit names the holder",
               any(a[2] == "stop" and "Alice" in (a[3] or "") for a in AUDIT))

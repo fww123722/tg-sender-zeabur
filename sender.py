@@ -3,6 +3,7 @@
 """群发引擎：多账号并发私聊、群组广播、频道转发。支持纯文本与图文/文件群发。"""
 import asyncio
 import random
+import time
 
 from telethon.errors import FloodWaitError
 from telethon.tl.types import InputPeerUser
@@ -165,6 +166,12 @@ def _cooldown_seconds(err) -> int:
     return COOLDOWN_SEC
 
 
+def _is_not_modified(e) -> bool:
+    """内容无变化时 Telegram 会报错，当作正常处理（避免因此新发一条消息）。"""
+    return (type(e).__name__ == "MessageNotModifiedError"
+            or "not modified" in str(e).lower())
+
+
 def _mark_cooldown(acc_no, err):
     """撞限流→写冷却记账（跨批次、跨重启生效；DB 故障绝不影响群发）"""
     try:
@@ -173,21 +180,36 @@ def _mark_cooldown(acc_no, err):
         log.warning(f"[账号{acc_no}] 冷却记账失败: {e}")
 
 
-async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None, bot=None):
-    """多个账号轮流派发目标，各自控制频率，并发执行。
-    群发过程中定期向 owner 汇总推送进度（百分比 + 各账号明细）。
+async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None,
+                             bot=None, msg=None, pool=None):
+    """多账号从共享队列领目标并发发送。
+    msg：已存在的进度消息（Telethon Message）。传了的话，开始/进度/暂停/汇总
+    全部**原地编辑这一条**，不再追加新消息（老板要求：不要额外发消息）。
+    pool：文案池文本列表，传了则每个目标随机挑一条（轮换文案）。
     汇报统一走控制 Bot（bot 参数），不占用群发账号；bot 缺失时回退账号1。"""
     # targets: {uid: {"username": ..., "access_hash": ...}}
 
     async def _report(msg_text):
-        """统一汇报通道：优先控制 Bot，避免群发账号给 owner 发汇报消息"""
+        """统一汇报通道：能改就改旧消息，改不了才新发一条。"""
+        nonlocal msg
         sender = bot or (accounts[0][1] if accounts else None)
         if sender is None:
             return
+        if msg is not None:
+            try:
+                await msg.edit(msg_text)
+                return
+            except Exception as e:
+                if _is_not_modified(e):
+                    return
+                log.info("进度消息编辑失败，改为新发一条：%s", e)
         try:
-            await sender.send_message(owner_entity, msg_text)
+            msg = await sender.send_message(owner_entity, msg_text)
         except Exception:
             log.warning("汇报消息发送失败")
+
+    def _pick_text():
+        return random.choice(pool) if pool else text
     uid_list = list(targets.keys())
 
     # 冷却记账：上一批撞过 430 的号，到点前不参与本轮分配（护号，避免反复硬撞拉长限流窗口）
@@ -224,6 +246,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
         "fail": 0,          # 发送失败
         "skipped": 0,       # 跳过（已发过/解析失败）
         "per_acc": {acc_no: {"sent": 0, "fail": 0} for acc_no, *_ in accounts},
+        "note": "",         # 临时状态（暂停/限流/补发），挤在同一条进度里
     }
     # 第一轮发送失败的目标：{uid: (acc_no, err)}，供第二轮换账号补发判断
     first_round_fail = {}
@@ -253,7 +276,12 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             f"   {done}/{total} | ✅ {progress['sent']} ❌ {progress['fail']} ⏭ {progress['skipped']}",
         ]
         # 老板要求：进度不列每账号明细，只报总计
-        await _report("\n".join(lines))
+        if progress.get("note"):
+            lines.append("   " + progress["note"])
+        snap = "\n".join(lines)
+        # 戒给「📋 查看进度」按钮读（它不能自己编一份假的）
+        state["live"] = {"text": snap, "at": int(time.time())}
+        await _report(snap)
 
     async def worker(client, acc_no):
         """从共享队列不断领目标：能发就一直发（尽可能多发），
@@ -266,7 +294,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             if len(avail) > 1 and acc_no in rate_limited_acc:
                 return
             if stats["sent_today"] >= state["daily_limit"]:
-                await _report(f"🚫 账号{acc_no} 今日已达上限 {state['daily_limit']} 条，该账号停止")
+                progress["note"] = f"🚫 账号{acc_no} 今日达上限，已停"
+                await _report_progress(owner_entity, accounts, progress)
                 return
             try:
                 uid = task_q.get_nowait()
@@ -277,9 +306,11 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 warmed = True
                 await asyncio.sleep(random.uniform(3, 8))
             if state["paused"]:
-                await _report(f"⏸ 账号{acc_no} 已暂停")
+                progress["note"] = "⏸ 已暂停"
+                await _report_progress(owner_entity, accounts, progress)
                 while state["paused"] and not state["stop"]:
                     await asyncio.sleep(5)
+                progress["note"] = ""
                 if state["stop"]:
                     task_q.put_nowait(uid)
                     return
@@ -290,7 +321,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 continue
             attempts[uid] += 1
             status, err = await _send_one(client, acc_no, uid, targets.get(uid, {}),
-                                          text, file=file, image=image,
+                                          _pick_text(), file=file, image=image,
                                           backoff=len(avail) == 1)
             if status == "skip":
                 progress["skipped"] += 1
@@ -364,7 +395,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     retryable = {u: v for u, v in first_round_fail.items()
                  if _is_rate_limited(v[1]) or _is_bad_peer(v[1])}
     if retryable and len(avail) > 1 and not state["stop"]:
-        await _report(f"🔁 第二轮补发：{len(retryable)} 个目标换账号重试")
+        progress["note"] = f"🔁 换号补发 {len(retryable)} 个目标"
+        await _report_progress(owner_entity, accounts, progress)
         for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
             info = targets.get(uid, {})
             tried = {orig_acc}
@@ -379,7 +411,7 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 tried.add(acc_no2)
                 if uid in db_load_sent(acc_no2):
                     continue
-                st, err2 = await _send_one(client2, acc_no2, uid, info, text,
+                st, err2 = await _send_one(client2, acc_no2, uid, info, _pick_text(),
                                            file=file, image=image, backoff=False)
                 if st == "fail" and _needs_cooldown(err2):
                     rate_limited_acc.add(acc_no2)

@@ -15,16 +15,16 @@ from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, ZIP_RECEIVED, API_ID, API_HA
 
 
 def _login_target():
-    """\u672c\u6b21\u767b\u5f55\u6d41\u7a0b\u8be5\u8ddf\u8c01\u5bf9\u8bdd\uff08\u56de\u843d\u5230\u4e3b\u4eba\uff09\u3002"""
+    """本次登录流程该跟谁对话（回落到主人）。"""
     ls = config.LOGIN_STATE or {}
     return ls.get("requester") or OWNER_ID
 
 
 async def login_send(bot, text, to=None):
-    """\u767b\u5f55\u6d41\u7a0b\u5411\u53d1\u8d77\u4eba\u53d1\u6d88\u606f\uff08\u5bb9\u9519\uff09\u3002
+    """登录流程向发起人发消息（容错）。
 
-    \u591a\u4eba\u5171\u7ba1\uff1a\u8c01\u70b9\u300c\u767b\u5f55 / \u6dfb\u52a0\u8d26\u53f7\u300d\uff0c\u9a8c\u8bc1\u7801\u548c\u63d0\u793a\u5c31\u53d1\u56de\u7ed9\u8c01\uff1b
-    requester \u7531\u8c03\u7528\u65b9\u5199\u8fdb LOGIN_STATE\u3002
+    多人共管：谁点「登录 / 添加账号」，验证码和提示就发回给谁；
+    requester 由调用方写进 LOGIN_STATE。
     """
     try:
         await bot.send_message(to or _login_target(), text)

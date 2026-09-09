@@ -49,6 +49,12 @@ BTN = {
     "set_parsemode": "文本模式",
     "set_recent": "近7天活跃",
     "set_repeat": "重复推广",
+    # 文案池
+    "pool": "📚 文案池",
+    "pool_add": "➕ 加文案",
+    "pool_list": "📋 看文案",
+    "pool_clear": "🗑 清空",
+    "pool_random": "🔀 随机轮换",
     # 通用
     "back": "🔙 返回主菜单",
     "back_campaign": "🔙 返回群发运营",
@@ -99,6 +105,11 @@ BTN_ACTION = {
     BTN["set_parsemode"]: "set_parsemode",
     BTN["set_recent"]: "set_recent_filter",
     BTN["set_repeat"]: "set_repeat",
+    BTN["pool"]: "menu_pool",
+    BTN["pool_add"]: "pool_add_prompt",
+    BTN["pool_list"]: "pool_list",
+    BTN["pool_clear"]: "pool_clear",
+    BTN["pool_random"]: "pool_random",
     BTN["pause"]: "pause",
     BTN["resume"]: "resume",
     BTN["stop"]: "stop",
@@ -110,6 +121,7 @@ BTN_ACTION = {
     BTN["back_report"]: "back_report",
     BTN["back_accounts"]: "back_accounts",
     BTN["back_groups"]: "back_groups",
+    BTN["back_settings"]: "back_settings",
     BTN["back"]: "back_home",
 }
 
@@ -123,20 +135,22 @@ INPUT_ACTIONS = {
     "set_quota_prompt",
     "set_parallel_prompt",
     "camp_step3",  # 写文案：输入内容
+    "pool_add_prompt",  # 文案池：输入一条文案
     "rep_user_prompt",  # 举报用户：输入用户名/链接
     "rep_channel_ai_prompt",  # AI批量：输入频道/群组
 }
 
 INPUT_HINTS = {
-    "add_group_prompt": "请发送群链接或群ID（支持 t.me/xxx / t.me/+xxx / 群ID）：",
+    "add_group_prompt": "请发送群链接或群ID（t.me/xxx / t.me/+xxx / 群ID）：",
     "batch_import_prompt": "请发送多个群链接，一行一个：",
-    "acc_add_prompt": "请输入要添加的账号手机号（含国家码，如 +8613800138000）：",
-    "acc_edit_profile_prompt": "请输入统一名字（所有账号改成这个名字；发「跳过」则不改名字）。\n同时会自动为没有用户名的账号随机生成可用用户名：",
+    "acc_add_prompt": "请输入手机号（含国家码，如 +8613800138000）：",
+    "acc_edit_profile_prompt": "请输入统一名字（发「跳过」则不改名）：",
     "set_speed_prompt": "请输入发送间隔秒数（例如 5 表示 5-15秒）：",
     "set_quota_prompt": "请输入每账号每日上限条数（例如 50）：",
     "set_parallel_prompt": "请输入并行发送的账号数（例如 3）：",
     "camp_step3": "请输入要群发的文案内容（可多行文字）：",
-    "rep_user_prompt": "请发送要举报的用户/频道用户名或链接（@username 或 t.me/xxx）：",
+    "pool_add_prompt": "请发送要存入文案池的内容（一次一条）：",
+    "rep_user_prompt": "请发送要举报的用户/频道（@username 或 t.me/xxx）：",
     "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
 }
 
@@ -286,13 +300,34 @@ def profile_menu_kb():
 
 
 def settings_menu_kb():
-    """系统设置菜单：间隔 / 上限 / 文本模式 / 近7天活跃 / 重复推广"""
+    """系统设置菜单：间隔 / 上限 / 文本模式 / 近7天活跃 / 重复推广 / 文案池"""
     return _kb([
         (BTN["set_speed"], BTN["set_quota"]),
         (BTN["set_parsemode"],),
         (BTN["set_recent"], BTN["set_repeat"]),
+        (BTN["pool"],),
         (BTN["back"],),
     ])
+
+
+def pool_menu_kb():
+    """文案池菜单：加 / 看 / 清空 / 随机轮换 / 返回。"""
+    return _kb([
+        (BTN["pool_add"], BTN["pool_list"]),
+        (BTN["pool_clear"], BTN["pool_random"]),
+        (BTN["back_settings"],),
+    ])
+
+
+def pool_inline_kb(rows):
+    """文案列表内联键盘：每条一个删除按钮 pl:<id>，底部清空/返回。
+    返回 rows（每项一行 Button.inline），可直接传 buttons=。"""
+    btns = []
+    for i, (source, msg_id, _text) in enumerate(rows, 1):
+        btns.append([Button.inline(f"🗑 第{i}条", ("pl:d:%d" % msg_id).encode())])
+    btns.append([Button.inline("🗑 全部清空", b"pl:clear"),
+                 Button.inline(BTN["back"], b"pl:back")])
+    return btns
 
 
 def dashboard_menu_kb():
@@ -354,9 +389,9 @@ def main_menu_text(accounts, groups_count, sent_count, pool_count, busy: bool,
         f"📁 群组: {groups_count} 个 | "
         f"📨 已发(去重): {sent_count} 人\n"
         f"📝 文案池: {pool_count} 条\n"
-        f"{'⏳ 正在执行任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
-        + ("" if role == "owner" else "ℹ️ 你是操作员：功能已全部开放，只有增删操作员需找admin。\n")
-        + "请选择功能："
+        f"{'⏳ 任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
+        + ("" if role == "owner"
+           else "ℹ️ 操作员：功能已全开，仅增删操作员需找admin。\n")
     )
 
 
@@ -364,49 +399,54 @@ def campaign_menu_text():
     """群发运营菜单文本（新版 3 步）。"""
     return (
         "🚀 群发运营\n\n"
-        "① 选群 — 从已保存的群里点按钮选择，自动拉成员进名单\n"
-        "② 写文案 — 发送文案（支持 HTML 格式）\n"
-        "③ 确认开跑 — 自动检查账号后一键群发\n\n"
-        "发完文案会自动检查账号并提示确认。\n"
-        "进度每 15 秒自动汇报，可暂停/继续/停止。"
+        "① 选群 — 选群并自动拉成员\n"
+        "② 写文案 — 直接发文案（支持 HTML）\n"
+        "③ 确认开跑 — 自动检查账号后开跑\n\n"
+        "进度只在一条消息上更新；可暂停/继续/停止。"
     )
 
 
 def groups_menu_text(is_operator: bool = False):
-    base = "📥 群管理\n\n查看已加入的群、添加新群、批量导入群链接。"
-    if is_operator:
-        return base + "、删除群记录。\n"
-    return (base + "、删除群记录。\n"
-            "💡「删除群」会先让在该群的账号退群，再删除记录，不可逆。")
+    return ("📥 群管理\n\n查看已加入的群、加群、批量导入、删除群记录。\n"
+            "⚠️「删除群」会让账号先退群再删记录，不可逆。")
 
 
 def accounts_menu_text():
-    return ("👥 账号管理\n\n查看账号状态、添加新账号、批量修改资料。\n"
-            "💡「账号过滤」检测的是 **Bot 已登录的推送账号**（不是收集来的用户名单）。\n"
-            "💡「🧊 重置冷却」清空所有账号的限流冷却记账，让冷却中的账号立即恢复派活。")
+    return ("👥 账号管理\n\n查看账号、添加账号、批量改资料、账号过滤。\n"
+            "🧊「重置冷却」清空限流记账，冷却中的账号立即恢复派活。")
 
 
 def profile_menu_text():
     return (
         "📝 批量改资料\n\n"
-        "🎲 随机小名 — 每账号随机中文小名（姓固定「小」+ 水果/蔬菜，如 小苹果/小西瓜），"
-        "并补随机用户名；头像只给**没有头像**的账号补随机风景图，已有头像的跳过不换\n"
-        "✏️ 统一名字 — 手动输入一个名字，所有账号改成同一个\n\n"
-        "⚠️ 每次修改间隔 2 秒防风控；补的头像为在线下载的真实风景照。"
+        "🎲 随机小名 — 随机「小+水果/蔬菜」名，补用户名；无头像的补随机风景照\n"
+        "✏️ 统一名字 — 所有账号改成同一个名字\n\n"
+        "⚠️ 每个账号间隔 2 秒防风控。"
     )
 
 
 def settings_menu_text(recent_on=None, repeat_on=None):
     lines = ["⚙️ 系统设置", "",
-             "下面的按钮直接调，不用打字：",
-             "• 发送间隔 / 每日上限 — 点 －／＋ 步进调数，点当前值可查看",
-             "• 文本模式 — 点击切换：纯文本 → HTML → Markdown"]
+             "• 发送间隔 / 每日上限 — 点 －／＋ 调数",
+             "• 文本模式 — 点击切换 纯文本 → HTML → Markdown"]
     if recent_on is not None:
-        lines.append(f"• 近7天活跃 — 当前：{'✅ 开（只拉近7天上线过的成员）' if recent_on else '❌ 关（拉全部有效成员）'}")
+        lines.append(f"• 近7天活跃 — {'✅ 开' if recent_on else '❌ 关'}")
     if repeat_on is not None:
-        lines.append(f"• 重复推广 — 当前：{'✅ 开（同一人可再次推送）' if repeat_on else '❌ 关（每人只推一次）'}")
-    lines += ["", "💡 设置直接标在按钮上，改完自动保存并生效。"]
+        lines.append(f"• 重复推广 — {'✅ 开（同一人可再推）' if repeat_on else '❌ 关（每人只推一次）'}")
+    lines += ["", "当前值都标在按钮上，改完自动生效。"]
     return "\n".join(lines)
+
+
+def pool_menu_text(count=0, random_on=False):
+    """文案池菜单文本。"""
+    return (
+        "📚 文案池｜%d 条\n\n"
+        "➕ 加文案 — 发一条存一条\n"
+        "📋 看文案 — 列出、逐条删\n"
+        "🔀 随机轮换 — %s\n\n"
+        "开启后每人随机挑一条发，不用手写文案。"
+        % (count, "✅ 开" if random_on else "❌ 关")
+    )
 
 
 def report_menu_text():

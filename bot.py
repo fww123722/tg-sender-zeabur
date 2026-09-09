@@ -30,6 +30,7 @@ from db import (
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
     join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
+    db_add_pool_text, db_list_pool, db_del_pool, db_clear_pool, db_pool_texts,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
@@ -47,6 +48,7 @@ from bot_menu import (
     group_pick_inline_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
+    pool_menu_kb, pool_menu_text, pool_inline_kb,
 )
 from reasons import REPORT_REASONS, REASON_CN
 from reporter import (
@@ -89,6 +91,18 @@ async def _reply(event, text, buttons=None):
         return None
 
 
+async def _edit_or_send(msg, event, text, buttons=None):
+    """能改旧消息就不新发（老板：不要额外发消息）。
+    buttons 省略时保留原键盘（Telethon edit 的 buttons 默认 NOT_SET，显式传 None 会清空）。"""
+    if msg is not None:
+        try:
+            return await (msg.edit(text) if buttons is None else msg.edit(text, buttons=buttons))
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return msg
+    return await _reply(event, text, buttons=buttons)
+
+
 # ---- 设置持久化读写（每账号状态存内存，设置落 DB） ----
 def _load_settings():
     s = get("settings") or {}
@@ -98,6 +112,7 @@ def _load_settings():
     s.setdefault("parse_mode", None)
     s.setdefault("recent_only_days", 0)
     s.setdefault("allow_repeat", False)
+    s.setdefault("pool_random", False)   # 群发时从文案池随机挑一条，不手写文案
     return s
 
 
@@ -109,6 +124,7 @@ def _apply_settings_to_state():
     state["parse_mode"] = s.get("parse_mode")
     state["recent_only_days"] = s.get("recent_only_days", 0)
     state["allow_repeat"] = s.get("allow_repeat", False)
+    state["pool_random"] = s.get("pool_random", False)
 
 
 PARSE_LABEL = {None: "纯文本", "html": "HTML", "md": "Markdown"}
@@ -253,20 +269,19 @@ def register_handlers(bot, accounts):
             try:
                 await bot.send_message(
                     new_uid,
-                    "\U0001f389 \u4e3b\u4eba\u5df2\u7ed9\u4f60\u5f00\u901a\u4f7f\u7528\u6743\u9650\u3002\n"
-                    "\u53d1 /start \u6253\u5f00\u63a7\u5236\u9762\u677f\uff1a\u7fa4\u53d1\u8fd0\u8425\u3001\u7fa4\u7ba1\u7406\u3001\u6570\u636e\u770b\u677f\u90fd\u80fd\u7528\u3002\n"
-                    "\u8d26\u53f7\u6c60\u548c\u540d\u5355\u662f\u516c\u7528\u7684\uff0c\u540c\u4e00\u65f6\u523b\u53ea\u80fd\u8dd1\u4e00\u4e2a\u4efb\u52a1\uff0c\u6392\u5230\u961f\u8bf7\u7b49\u5f85\u3002")
+                    "🎉 admin 已给你开通权限。\n"
+                    "发 /start 打开控制面板：群发运营、群管理、数据看板都能用。\n"
+                    "账号池和名单公用，同一时刻只能跑一个任务，请排队。")
             except Exception as e:
-                log.info(f"\u63d0\u524d\u901a\u77e5\u65b0\u64cd\u4f5c\u5458\u5931\u8d25\uff08\u6b63\u5e38\uff0c\u4ed6\u81ea\u5df1\u53d1 /start \u5373\u53ef\uff09: {e}")
+                log.info(f"提前通知新操作员失败（正常，他自己发 /start 即可）: {e}")
 
         asyncio.ensure_future(_greet(uid))
         await _reply(event,
             f"✅ 已授权：{shown}（id={uid}）"
-            + ("" if persisted else "\n⚠️ 写数据库失败，本次授权只在内存生效，重启后会丢，请稍后重试。") + "\n\n"
-            f"让他直接私聊本 Bot 发 /start 即可使用。\n"
-            f"他能做：几乎全部——群发、群管理、账号登录/新增、设置、举报、删群。\n"
-            f"他唯一不能做：增删操作员（/addop /dropop /oplist 你独占）。\n"
-            f"当前操作员共 {len(OPERATORS)} 人，查看 /oplist")
+            + ("" if persisted else "\n⚠️ 写库失败，本次只在内存生效，重启会丢。") + "\n\n"
+            f"让他私聊本 Bot 发 /start 即可使用。\n"
+            f"除增删操作员外全部可用（/addop /dropop /oplist 你独占）。\n"
+            f"当前 {len(OPERATORS)} 名操作员，查看 /oplist")
 
     @bot.on(events.NewMessage(pattern=r"^/dropop\s+(\d+)$"))
     async def on_dropop(event):
@@ -285,14 +300,13 @@ def register_handlers(bot, accounts):
         if not is_owner(event.sender_id):
             await _reply(event, "⛔ 只有admin能看操作员名单。")
             return
-        lines = [f"👥 操作员白名单（{len(OPERATORS)} 人）"]
+        lines = [f"👥 操作员（{len(OPERATORS)} 人）"]
         for uid, name in sorted(OPERATORS.items(), key=lambda kv: kv[1]):
             lines.append(f"  • {name} — {uid}")
         lines.append("—")
         lines.append("/addop <user_id> [备注名]  新增")
         lines.append("/dropop <user_id>          停用")
-        lines.append("（user_id 可让对方发 /whoami 查看）")
-        lines.append("（停用后其历史审计记录保留，不会删）")
+        lines.append("user_id 让对方发 /whoami 查看；停用后审计记录保留")
         await _reply(event, "\n".join(lines))
 
     @bot.on(events.NewMessage(pattern="^/whoami$"))
@@ -311,7 +325,7 @@ def register_handlers(bot, accounts):
         except (TypeError, ValueError):
             n = 15
         n = max(1, min(n, 50))
-        only_self = False  # \u5168\u5f00\uff1a\u64cd\u4f5c\u5458\u4e5f\u53ef\u770b\u5168\u91cf
+        only_self = False  # 全开：操作员也可看全量
         uid = event.sender_id
         rows = []
         if only_self:
@@ -504,6 +518,7 @@ def register_handlers(bot, accounts):
         "menu_accounts": accounts_menu_text,
         "menu_settings": settings_menu_text,
         "menu_report": report_menu_text,
+        "menu_pool": pool_menu_text,
     }
     MENU_KB = {
         "menu_campaign": campaign_menu_kb,
@@ -511,12 +526,15 @@ def register_handlers(bot, accounts):
         "menu_accounts": accounts_menu_kb,
         "menu_settings": _settings_kb,
         "menu_report": report_menu_kb,
+        "menu_pool": pool_menu_kb,
     }
 
     def _menu_text(event, action):
         if action == "menu_settings":
             _apply_settings_to_state()
             return settings_menu_text(state.get("recent_only_days"), state.get("allow_repeat"))
+        if action == "menu_pool":
+            return pool_menu_text(db_count_pool(), bool(state.get("pool_random")))
         base = MENU_SHOW[action]()
         if action == "menu_groups":
             base = groups_menu_text(_is_op(event))
@@ -572,7 +590,7 @@ def register_handlers(bot, accounts):
             state.setdefault("del_group_map_by", {})[str(cid)] = {
                 str(i): g for i, g in enumerate(groups, 1)}
             await _reply(event,
-                "🗑 点选要删除的群（会先让在群里的账号退出该群，再删 Bot 记录）：",
+                "🗑 点选要删的群（先退群、再删记录）：",
                 buttons=group_del_kb(groups))
         elif action == "del_confirm":
             pend = state.get("pending_del_group")
@@ -633,8 +651,37 @@ def register_handlers(bot, accounts):
             await _reply(event, accounts_menu_text(), buttons=accounts_menu_kb())
         elif action == "back_groups":
             await _reply(event, _groups_text(event), buttons=_groups_kb(event))
+        elif action == "back_settings":
+            _apply_settings_to_state()
+            await _reply(event, settings_menu_text(state.get("recent_only_days"),
+                                                   state.get("allow_repeat")),
+                         buttons=_settings_kb())
+        elif action == "pool_random":
+            s = _load_settings()
+            new = not s.get("pool_random", False)
+            s["pool_random"] = new
+            ops_set("settings", s)
+            state["pool_random"] = new
+            if new and not db_count_pool():
+                tip = "⚠️ 已开，但池里还没文案，先点「➕ 加文案」"
+            else:
+                tip = "✅ 已开：每人随机挑一条发" if new else "❌ 已关：用「② 写文案」那一条"
+            await _reply(event, tip + "\n\n" + pool_menu_text(db_count_pool(), new),
+                         buttons=pool_menu_kb())
+        elif action == "pool_clear":
+            n = db_clear_pool()
+            _audit(event, "pool_clear", f"{n} 条")
+            await _reply(event, f"🗑 已清空文案池（{n} 条）" if n else "ℹ️ 文案池本就没有文案",
+                         buttons=pool_menu_kb())
+        elif action == "pool_list":
+            await _pool_list(event)
         elif action == "camp_status":
-            await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(event.sender_id), buttons=campaign_menu_kb())
+            # 在跑：给实时进度（与聊天里那条同文本）；没在跑：不编造进度、不贴草稿清单
+            live = state.get("live") or {}
+            if state["busy"] and live.get("text"):
+                await _reply(event, live["text"], buttons=campaign_menu_kb())
+            else:
+                await _reply(event, "ℹ️ 当前没有在跑的任务。", buttons=campaign_menu_kb())
         elif action == "camp_step1":
             await _campaign_pick_group(event, accounts)
         elif action == "camp_start":
@@ -642,26 +689,26 @@ def register_handlers(bot, accounts):
         elif action == "pause" or action == "resume":
             b = state.get("busy_by") or {}
             if not state["busy"]:
-                await _reply(event, "\u2139\ufe0f \u73b0\u5728\u6ca1\u6709\u5728\u8dd1\u7684\u4efb\u52a1\u3002")
+                await _reply(event, "ℹ️ 现在没有在跑的任务。")
                 return
-            who = b.get("name") or "\u672a\u77e5"
+            who = b.get("name") or "未知"
             if action == "pause":
                 state["paused"] = True
-                _audit(event, "pause", "\u6682\u505c\u4e86 " + who + " \u7684\u4efb\u52a1")
-                await _reply(event, "\u23f8 \u5df2\u6682\u505c\uff08\u70b9\u300c\u7ee7\u7eed\u300d\u6062\u590d\uff09",
+                _audit(event, "pause", "暂停了 " + who + " 的任务")
+                await _reply(event, "⏸ 已暂停（点「继续」恢复）",
                              buttons=campaign_menu_kb())
             else:
                 state["paused"] = False
-                _audit(event, "resume", "\u7ee7\u7eed\u4e86 " + who + " \u7684\u4efb\u52a1")
-                await _reply(event, "\u25b6\ufe0f \u5df2\u7ee7\u7eed", buttons=campaign_menu_kb())
+                _audit(event, "resume", "继续了 " + who + " 的任务")
+                await _reply(event, "▶️ 已继续", buttons=campaign_menu_kb())
         elif action == "stop":
             b = state.get("busy_by") or {}
-            who = b.get("name") or "\u5f53\u524d\u4efb\u52a1"
+            who = b.get("name") or "当前任务"
             state["stop"] = True
             state["paused"] = True
             _clear_busy()
             release_list(b.get("uid"))
-            _audit(event, "stop", "\u505c\u6389\u4e86 " + who + " \u7684\u4efb\u52a1")
+            _audit(event, "stop", "停掉了 " + who + " 的任务")
             await _reply(event, "🛑 已停止当前任务", buttons=campaign_menu_kb())
         elif action == "set_recent_filter":
             _apply_settings_to_state()
@@ -671,8 +718,8 @@ def register_handlers(bot, accounts):
             ops_set("settings", s)
             state["recent_only_days"] = new
             await _reply(event,
-                ("✅ 已开启「近7天活跃」：拉取成员时只保留近 7 天内上线过的用户。"
-                 if new else "❌ 已关闭「近7天活跃」：拉取全部有效成员（不看上线时间）。")
+                ("✅ 「近7天活跃」已开：只拉近 7 天上线过的成员。"
+                 if new else "❌ 「近7天活跃」已关：拉全部有效成员。")
                 + f"\n\n{settings_menu_text(new, s.get('allow_repeat'))}",
                 buttons=_settings_kb())
         elif action == "set_repeat":
@@ -683,9 +730,9 @@ def register_handlers(bot, accounts):
             ops_set("settings", s)
             state["allow_repeat"] = new
             await _reply(event,
-                ("✅ 已开启「重复推广」：同一账号可以再次推给已发过的用户（适合换文案重推）。"
+                ("✅ 「重复推广」已开：发过的人可再推（适合换文案重推）。"
                  if new else
-                 "❌ 已关闭「重复推广」：每人只推一次，已发过的自动跳过。")
+                 "❌ 「重复推广」已关：每人只推一次，发过的自动跳过。")
                 + f"\n\n{settings_menu_text(s.get('recent_only_days'), new)}",
                 buttons=_settings_kb())
         elif action == "back_home":
@@ -695,7 +742,7 @@ def register_handlers(bot, accounts):
             await _reply(event, "📋 请选择举报理由：", buttons=reason_menu_kb())
         elif action == "rep_status":
             await _reply(event, f"⏳ 账号冷却状态\n\n{cooldown_summary()}\n\n"
-                                "（举报后账号进入30分钟冷却，防止触发风控）",
+                                "举报后冷却 30 分钟，防风控。",
                                 buttons=report_menu_kb())
         elif action == "back_report":
             await _reply(event, report_menu_text(), buttons=report_menu_kb())
@@ -744,10 +791,9 @@ def register_handlers(bot, accounts):
             state["pending_del_group"] = (gid, title)
             await _reply(event,
                 f"⚠️ 确认删除群「{title}」(id={gid})？\n\n"
-                "将执行：\n"
-                "  1) 让所有在该群的账号退出该群\n"
-                "  2) 删除 Bot 表里的群记录\n\n"
-                "退群不可逆（需重新加群才能回来）。点「⚠️ 确认退群并删除」执行，点「↩️ 取消」返回。",
+                "1) 该群内所有账号退群\n"
+                "2) 删除 Bot 群记录\n\n"
+                "退群不可逆，需重新加群才能回来。",
                 buttons=group_del_confirm_kb())
             return
 
@@ -785,13 +831,15 @@ def register_handlers(bot, accounts):
         try:
             if data.startswith("st:"):
                 if not is_authorized(event.sender_id):
-                    await event.answer("\u26d4 \u65e0\u6743\u9650", alert=True)
+                    await event.answer("⛔ 无权限", alert=True)
                     return
                 await _cb_settings(event, data[3:])
             elif data.startswith("db:"):
                 await _cb_dashboard(event, data[3:])
             elif data.startswith("gp:"):
                 await _cb_grouppick(event, data[3:])
+            elif data.startswith("pl:"):
+                await _cb_pool(event, data[3:])
             else:
                 await event.answer()
         except Exception as e:
@@ -851,6 +899,58 @@ def register_handlers(bot, accounts):
                          buttons=_settings_kb())
         await event.answer(tip)
 
+    def _pool_list_text():
+        """文案池列表文本+行，首次展示与删除后重渲染共用。"""
+        rows = db_list_pool(30)
+        if not rows:
+            return False, "📚 文案池还没有文案。点「➕ 加文案」存一条。", []
+        total = db_count_pool()
+        lines = ["📚 文案池 %d 条%s："
+                 % (total, "（下列前 30）" if total > 30 else "")]
+        for i, (source, _mid, t) in enumerate(rows, 1):
+            head = (t or "").strip().replace("\n", " ")[:46] or "（空）"
+            lines.append("%d. %s%s" % (i, head, "" if source == "manual" else " ·采集"))
+        lines.append("点下面按钮删除对应条目：")
+        return True, "\n".join(lines), rows
+
+    async def _pool_list(event):
+        _ok, text, rows = _pool_list_text()
+        await _reply(event, text,
+                     buttons=pool_inline_kb(rows) if rows else pool_menu_kb())
+
+    async def _cb_pool(event, arg):
+        """文案池内联：pl:d:<id> 删单条 / pl:clear 清空 / pl:back 返回"""
+        if arg == "back":
+            await event.answer()
+            await _reply(event, pool_menu_text(db_count_pool(), bool(state.get("pool_random"))),
+                         buttons=pool_menu_kb())
+            return
+        if arg == "clear":
+            n = db_clear_pool()
+            _audit(event, "pool_clear", "%d 条" % n)
+            await event.edit("🗑 已清空文案池（%d 条）" % n,
+                             buttons=pool_menu_kb())
+            await event.answer("已清空")
+            return
+        if arg.startswith("d:"):
+            try:
+                mid = int(arg[2:])
+            except ValueError:
+                await event.answer("参数错误", alert=True)
+                return
+            hit = next((r for r in db_list_pool(30) if int(r[1]) == mid), None)
+            if not hit:
+                await event.answer("这条已不在列表里，请重新打开", alert=True)
+                return
+            db_del_pool(hit[0], mid)
+            _audit(event, "pool_del", str(mid))
+            _ok, text, rows = _pool_list_text()
+            await event.edit(text,
+                             buttons=pool_inline_kb(rows) if rows else pool_menu_kb())
+            await event.answer("已删除")
+            return
+        await event.answer()
+
     async def _cb_grouppick(event, arg):
         """选群内联按钮：gp:<序号> / gp:back"""
         if arg == "back":
@@ -874,6 +974,8 @@ def register_handlers(bot, accounts):
             return accounts_menu_kb
         if action == "acc_edit_profile_prompt":
             return accounts_menu_kb
+        if action == "pool_add_prompt":
+            return pool_menu_kb
         return None
 
     # ---------- 消费一个 pending 输入 ----------
@@ -896,7 +998,7 @@ def register_handlers(bot, accounts):
         if action == "camp_step3":
             touch_list(event.sender_id)
             set_campaign(event.sender_id, text=text)
-            _audit(event, "save_text", f"{len(text)} \u5b57")
+            _audit(event, "save_text", f"{len(text)} 字")
             # 自动检查账号状态
             ready = await _check_accounts_ready(event, accounts)
             if not ready:
@@ -916,6 +1018,11 @@ def register_handlers(bot, accounts):
                     + note + "\n\n" + campaign_text(event.sender_id)
                     + f"\n\n✅ {len(ready)} 个账号就绪，名单 {db_count_targets()} 人。\n点「③ ✅ 确认开跑」开始群发。")
             await _reply(event, body, buttons=campaign_menu_kb())
+        elif action == "pool_add_prompt":
+            db_add_pool_text(text)
+            _audit(event, "pool_add", f"{len(text)} 字")
+            await _reply(event, "✅ 已存入（共 %d 条）" % db_count_pool(),
+                         buttons=pool_menu_kb())
         elif action == "add_group_prompt":
             await _finish_addgroup(event, accounts, text)
         elif action == "batch_import_prompt":
@@ -982,7 +1089,7 @@ def register_handlers(bot, accounts):
             return r_name or actor_name(uid)
         sent = db_sent_global()
         lines = [
-            "\U0001f4ca 数据看板",
+            "📊 数据看板",
             f"• 已发(去重): {sent} 人",
             f"• 文案池: {db_count_pool()} 条",
             f"• 已加群: {db_group_count()} 个",
@@ -1005,9 +1112,9 @@ def register_handlers(bot, accounts):
                 lines.append("  （近 7 天还没有群发记录）")
         cl = get_list_claim()
         if cl:
-            lines.append(f"\U0001f512 名单占用：{cl.get('name')}（{cl.get('group') or '-'}）")
+            lines.append(f"🔒 名单占用：{cl.get('name')}（{cl.get('group') or '-'}）")
         if is_authorized(event.sender_id):
-            lines.append(f"\U0001f465 操作员 {len(OPERATORS)} 人（/oplist）；审计：/oplog")
+            lines.append(f"👥 操作员 {len(OPERATORS)} 人（/oplist）；审计：/oplog")
         text = "\n".join(lines)
         kb = dashboard_inline_kb(show_accounts)
         if edit:
@@ -1166,18 +1273,24 @@ def register_handlers(bot, accounts):
         if not camp.get("group"):
             await _reply(event, "❌ 还没选群。请先点「① 选群」。", buttons=campaign_menu_kb())
             return
-        text = camp.get("text")
+        # 开了随机轮换 → 用文案池，不要求手写文案
+        pool = db_pool_texts() if state.get("pool_random") else []
+        if state.get("pool_random") and not pool:
+            await _reply(event, "❌ 文案池是空的。先去「📚 文案池」加几条，或关掉随机轮换。",
+                         buttons=campaign_menu_kb())
+            return
+        text = camp.get("text") or (pool[0] if pool else "")
         if not text:
-            await _reply(event, "❌ 还没写文案。请点「② 写文案」后直接发文案。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 还没写文案。点「② 写文案」发一条，或开「🔀 随机轮换」用文案池。", buttons=campaign_menu_kb())
             return
         targets = db_load_targets()
         if not targets:
             await _reply(event, "❌ 名单为空（可能该群没有可拉的有效成员）。请重新点「① 选群」拉一次。", buttons=campaign_menu_kb())
             return
-        _start_send_campaign(event, accounts, text)
+        _start_send_campaign(event, accounts, text, pool or None)
 
-    def _start_send_campaign(event, accounts, text):
-        """真正启动多账号群发。"""
+    def _start_send_campaign(event, accounts, text, pool=None):
+        """真正启动多账号群发。pool=文案池随机轮换列表（可空）。"""
         targets = db_load_targets()
         if not targets:
             asyncio.ensure_future(_reply(event, "❌ 名单为空，请先拉取名单。"))
@@ -1192,26 +1305,29 @@ def register_handlers(bot, accounts):
         cid = db_campaign_start(uid, actor_name(uid), camp.get("group", ""),
                                 camp.get("group_title", ""), len(targets), text)
         _audit(event, "start_send",
-               f"{camp.get('group_title') or camp.get('group') or '-'} \u76ee\u6807 {len(targets)} \u4eba")
+               f"{camp.get('group_title') or camp.get('group') or '-'} 目标 {len(targets)} 人")
         set_campaign(uid, started=int(time.time()), campaign_id=cid)
         asyncio.ensure_future(
-            _run_and_finish(event, accounts, text, targets, sent_before))
+            _run_and_finish(event, accounts, text, targets, sent_before, pool=pool or None))
 
-    async def _run_and_finish(event, accounts, text, targets, sent_before=0):
+    async def _run_and_finish(event, accounts, text, targets, sent_before=0, pool=None):
         uid = event.sender_id
         crashed = None
+        # 全程只维护这一条消息：开跑→进度→汇总全部原地改，不再追发
+        msg = await _reply(event,
+            f"🚀 开始群发：{len(accounts)}个账号 | 间隔 {state['min_delay']}-{state['max_delay']}s",
+            buttons=_main_kb(event))
+        state["live"] = {"text": (msg.message if msg else "") or "", "at": int(time.time())}
         try:
-            await _reply(event,
-                f"🚀 开始群发：{len(accounts)}个账号 | 目标 {len(targets)} 人 | "
-                f"间隔 {state['min_delay']}-{state['max_delay']}s\n"
-                "每 15 秒自动汇报进度。可用「暂停/继续/停止」控制。")
             try:
-                result = await send_to_list_multi(accounts, targets, text, event.chat_id, bot=bot)
+                result = await send_to_list_multi(accounts, targets, text, event.chat_id,
+                                                  bot=bot, msg=msg, pool=pool)
             except Exception as e:
                 crashed = e
                 result = (f"❌ 群发异常中断：{type(e).__name__}: {str(e)[:200]}\n"
                           "号池与名单已释放，草稿保留，可以直接重新开跑。")
-            await _reply(event, result, buttons=_main_kb(event))
+            # 汇总已由 sender 写进同一条消息；这里再写一次是空操作（not modified 已吞）；崩溃路径则靠它补上
+            await _edit_or_send(msg, event, result)
             done_n = max(0, db_sent_global() - sent_before)
             cid = (get_campaign(uid) or {}).get("campaign_id")
             if cid:
@@ -1222,6 +1338,7 @@ def register_handlers(bot, accounts):
                 # 发完清除一次性运营状态
                 clear_campaign(uid)
         finally:
+            state["live"] = None
             release_list(uid)
             _clear_busy()
             state["paused"] = False
@@ -1236,20 +1353,29 @@ def register_handlers(bot, accounts):
             await _reply(event, _busy_tip(event), buttons=report_menu_kb())
             return
         _set_busy(event.sender_id)
+        rep_msg = None
+
+        async def _say(text):
+            """举报进度：第一条发出去，之后全部原地改（26 个回调不再刷屏）。"""
+            nonlocal rep_msg
+            if rep_msg is None:
+                rep_msg = await _reply(event, text, buttons=report_menu_kb())
+            else:
+                rep_msg = await _edit_or_send(rep_msg, event, text, buttons=report_menu_kb())
+            return rep_msg
+
         try:
-            await _reply(event, f"🔍 准备举报目标：{target}\n模式：{mode}\n正在分配可用账号...",
-                         buttons=report_menu_kb())
             ai_cfg = load_ai_config()
+            note = ""
+            if mode == "super":
+                note = "\nAI：自动理由" if ai_cfg else "\nAI：未配置，用兜底理由"
+            await _say(f"🔍 举报目标：{target}\n模式：{mode}{note}")
             if mode == "user":
-                res = await report_user(target, status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+                res = await report_user(target, status_cb=_say)
             elif mode == "custom":
-                res = await report_custom(target, reason_key,
-                                         status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+                res = await report_custom(target, reason_key, status_cb=_say)
             elif mode == "super":
-                status_note = "（已启用 AI 自动生成理由）" if ai_cfg else "（未配置 AI，使用兜底理由）"
-                await _reply(event, f"🤖 AI 批量举报 {status_note}", buttons=report_menu_kb())
-                res = await report_super(target, ai_cfg=ai_cfg,
-                                        status_cb=lambda m: _reply(event, m, buttons=report_menu_kb()))
+                res = await report_super(target, ai_cfg=ai_cfg, status_cb=_say)
             else:
                 res = None
             if res:
@@ -1263,9 +1389,9 @@ def register_handlers(bot, accounts):
                     + (f"\n📊 原因分布：\n{res['stats_text']}\n" if res.get('stats_text') else "")
                     + (f"\n📋 详情：\n{res['text']}" if res.get('text') else "")
                 )
-                await _reply(event, body, buttons=report_menu_kb())
+                await _say(body)
             else:
-                await _reply(event, "❌ 举报未执行（无可用账号或目标解析失败）。", buttons=report_menu_kb())
+                await _say("❌ 举报未执行（无可用账号或目标解析失败）。")
         finally:
             _clear_busy()
 
@@ -1276,9 +1402,9 @@ def register_handlers(bot, accounts):
             await _reply(event, "⚠️ 当前没有已登录的推送账号。\n先点「添加账号」登录。",
                          buttons=accounts_menu_kb())
             return
-        await _reply(event, "🔄 正在逐个检测推送账号（连接/会话/限流）…")
+        m0 = await _reply(event, "🔄 正在逐个检测账号（连接/会话/限流）…")
         r = await check_login_accounts(accounts)
-        await _reply(event, r, buttons=accounts_menu_kb())
+        await _edit_or_send(m0, event, r, buttons=accounts_menu_kb())
 
     async def _run_editprofile(event, accounts, name=None, random_mode=False):
         if _no_accounts(event):
@@ -1289,25 +1415,25 @@ def register_handlers(bot, accounts):
         _set_busy(event.sender_id)
         try:
             if random_mode:
-                await _reply(event,
-                    "🎲 开始一键养号：随机英文姓名 + 随机真实风景头像 + 补随机用户名…\n"
-                    "每账号间隔 2 秒，稍等。")
+                m0 = await _reply(event,
+                    "🎲 开始改资料：随机蔬果小名 + 补用户名 + 无头像的补风景照…\n"
+                    "每号间隔 2 秒。")
                 r = await edit_all_profiles(event.chat_id, random_names=True,
                                             random_avatar=True, username_mode="random")
-                await _reply(event, r, buttons=accounts_menu_kb())
+                await _edit_or_send(m0, event, r, buttons=accounts_menu_kb())
                 return
             # 「跳过」= 不改名字，只处随机用户名
             if name and name.strip() in ("跳过", "skip", "-"):
                 name = None
             uname = (name or "").strip()
-            await _reply(
+            m0 = await _reply(
                 event,
-                "🔄 正在批量修改账号资料…\n"
+                "🔄 正在批量改资料…\n"
                 f"  统一名字：{uname or '(不改)'}\n"
-                "  用户名：无用户名的账号自动随机生成（已有的不动）",
+                "  用户名：无用户名的随机生成（已有的不动）",
             )
             r = await edit_all_profiles(event.chat_id, name=name or None, username_mode="random")
-            await _reply(event, r, buttons=accounts_menu_kb())
+            await _edit_or_send(m0, event, r, buttons=accounts_menu_kb())
         finally:
             _clear_busy()
 
@@ -1338,7 +1464,7 @@ def register_handlers(bot, accounts):
 
     async def _finish_batchimport(event, accounts, text):
         _audit(event, "batch_import",
-               f"{len([l for l in text.splitlines() if l.strip()])} \u4e2a\u94fe\u63a5")
+               f"{len([l for l in text.splitlines() if l.strip()])} 个链接")
         links = [ln for ln in text.splitlines() if ln.strip()]
         if not links:
             await _reply(event, "没有识别到链接。", buttons=_groups_kb(event))
