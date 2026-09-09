@@ -54,7 +54,8 @@ def _chat_url(base_url: str) -> str:
 
 
 async def ai_chat(cfg: dict, system_prompt: str, user_content: str,
-                 temperature: float = 0.9, retries: int = 2) -> str:
+                 temperature: float = 0.9, retries: int = 2,
+                 max_tokens: int = 4096) -> str:
     """调用 OpenAI 兼容 Chat Completions，带重试。"""
     url = _chat_url(cfg["base_url"])
     headers = {
@@ -68,7 +69,7 @@ async def ai_chat(cfg: dict, system_prompt: str, user_content: str,
             {"role": "user", "content": user_content},
         ],
         "temperature": temperature,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     }
     last_err = None
     for attempt in range(retries + 1):
@@ -137,7 +138,7 @@ Violation type: {reason_cn}
 
 【REPORT WRITING REQUIREMENTS】
 
-Write an emotional, detailed report in English (300 to 450 words):
+Write an emotional report in English, ABOUT 90 to 110 words (hard cap 900 characters):
 
 1. Start with shock/anger: "I am absolutely horrified...", "I cannot believe what I just saw..."
 2. Describe the specific content — reference message IDs, add vivid details
@@ -202,7 +203,7 @@ Violation type: {reason_cn}
 
 【REPORT WRITING REQUIREMENTS】
 
-Write an emotional, detailed report in English (250 to 400 words):
+Write an emotional report in English, ABOUT 80 to 100 words (hard cap 900 characters):
 
 1. Start with your concern: "I came across a suspicious account on Telegram..."
 2. Describe specific suspicious elements — quote their username, display name, and bio content
@@ -284,7 +285,8 @@ async def generate_super_reports(cfg, msgs_text, channel_name, msg_count,
             reason_cn=r_cn, reason_en=reason,
             law_context=get_law_context(reason))
         try:
-            txt = await ai_chat(cfg, '', gen_input, temperature=1.2, retries=1)
+            txt = await ai_chat(cfg, '', gen_input, temperature=1.2, retries=1,
+                            max_tokens=900)
             results[idx] = {'reason': reason, 'report_text': txt.strip().strip('"').strip("'")}
         except Exception:
             results[idx] = {
@@ -331,7 +333,8 @@ async def generate_user_report(cfg, username, user_name, user_bio, status_cb=Non
         reason_cn=r_cn, reason_en=reason,
         law_context=get_law_context(reason))
     try:
-        txt = await ai_chat(cfg, '', gen_input, temperature=1.2, retries=1)
+        txt = await ai_chat(cfg, '', gen_input, temperature=1.2, retries=1,
+                            max_tokens=900)
         return {'reason': reason, 'report_text': txt.strip().strip('"').strip("'")}
     except Exception:
         return {'reason': reason, 'report_text': f'This account @{username} is suspicious ({r_cn}). Please investigate and suspend per DSA Article 16.'}

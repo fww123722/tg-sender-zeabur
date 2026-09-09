@@ -14,10 +14,13 @@
 所有耗时操作通过 status_cb 向前端回传进度文本，与 tg-sender 的 _reply 解耦。
 """
 import asyncio
+import contextlib
+import os
 import random
 import re
 import time
 
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.account import ReportPeerRequest, ReportProfilePhotoRequest
 from telethon.tl.functions.messages import (
     ReportRequest as MsgReportRequest,
@@ -82,6 +85,51 @@ def cooldown_summary() -> str:
 # ============================================================
 # 进度条工具
 # ============================================================
+# ============================================================
+# 举报防「静默睡死」
+# ============================================================
+# Telethon 默认 flood_sleep_threshold=60：撞限流不报错而是自己睡最多 60 秒，
+# 多个请求叠加起来就是几十分钟无响应。举报链路改成：立刻抛错 + 超阈值换号。
+REPORT_FLOOD_MAX = int(os.environ.get("REPORT_FLOOD_MAX", "120"))
+REPORT_API_TIMEOUT = int(os.environ.get("REPORT_API_TIMEOUT", "25"))
+# 举报正文长度上限（与 AI prompt 的字数要求对齐，不白跑也不截半句）
+REPORT_TEXT_MAX = int(os.environ.get("REPORT_TEXT_MAX", "900"))
+# 进度刷新频率（个）：1=每个账号都刷，避免界面长时间不动被当成卡死
+REPORT_REFRESH_EVERY = max(1, int(os.environ.get("REPORT_REFRESH_EVERY", "1")))
+
+
+@contextlib.contextmanager
+def _no_silent_sleep(client):
+    """临时关掉 Telethon 的自动 flood 睡眠（1.44.0 的 __call__ 不转发该参数，
+    只能改实例属性）。退出时恢复，不影响群发。"""
+    old = getattr(client, "flood_sleep_threshold", 60)
+    try:
+        client.flood_sleep_threshold = 0
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            client.flood_sleep_threshold = old
+        except Exception:
+            pass
+
+
+async def _api(client, request):
+    """带硬超时的单次调用；返回 (ok, err)。限流/超时都如实报，不再静默吞。"""
+    with _no_silent_sleep(client):
+        try:
+            await asyncio.wait_for(client(request), timeout=REPORT_API_TIMEOUT)
+            return True, ""
+        except asyncio.TimeoutError:
+            return False, "超时"
+        except FloodWaitError as e:
+            return False, "限流等%s秒" % e.seconds
+        except Exception as e:
+            return False, type(e).__name__ + ":" + str(e)[:28]
+
+
 def _bar(done, total, width=12):
     pct = done * width // total if total else 0
     return '█' * pct + '░' * (width - pct)
@@ -96,36 +144,68 @@ def _truncate(text, limit=3800):
 # ============================================================
 # 内部：对一个 client 执行「举报三连」
 # ============================================================
+async def _resolve(client, target):
+    """带硬超时的实体解析，避免 get_input_entity 无限挂住。"""
+    try:
+        return await asyncio.wait_for(
+            client.get_input_entity(target), timeout=REPORT_API_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise
+    except Exception:
+        return await asyncio.wait_for(
+            client.get_entity(target), timeout=REPORT_API_TIMEOUT)
+
+
 async def _do_report_once(client, input_peer, reason_obj, report_text,
                           msg_ids=None):
-    """对单个账号执行举报 API 组合。返回 (ok_api, total_api)。"""
-    api_ok, api_total = 0, 2  # ReportPeer + MsgSpam 至少2个
+    """对单个账号执行举报 API 组合。返回 (ok_api, total_api, err)。
 
-    # 1) ReportPeerRequest
-    try:
-        await client(ReportPeerRequest(peer=input_peer, reason=reason_obj, message=report_text or ""))
+    与旧版区别：不再 except: pass 静默吞错，也不再让 Telethon 偷偷睡 60 秒。
+    撞长限流（>REPORT_FLOOD_MAX 秒）立刻收手，原因回带给调用方换号。
+    """
+    api_ok, api_total = 0, 2  # ReportPeer + MsgSpam 至少2个
+    errs = []
+
+    ok, err = await _api(client, ReportPeerRequest(
+        peer=input_peer, reason=reason_obj, message=report_text or ""))
+    if ok:
         api_ok += 1
-    except Exception:
-        pass
+    else:
+        errs.append(err)
+        if _give_up_early(err):
+            return api_ok, api_total, err
 
     # 2) MsgReportRequest（带具体消息 ID）
     if msg_ids:
         api_total = 3
-        try:
-            await client(MsgReportRequest(peer=input_peer, id=msg_ids,
-                                          option=b'', message=report_text or ""))
+        ok, err = await _api(client, MsgReportRequest(
+            peer=input_peer, id=msg_ids, option=b'', message=report_text or ""))
+        if ok:
             api_ok += 1
-        except Exception:
-            pass
+        else:
+            errs.append(err)
+            if _give_up_early(err):
+                return api_ok, api_total, err
 
     # 3) MsgReportSpamRequest
-    try:
-        await client(MsgReportSpamRequest(peer=input_peer))
+    ok, err = await _api(client, MsgReportSpamRequest(peer=input_peer))
+    if ok:
         api_ok += 1
-    except Exception:
-        pass
+    else:
+        errs.append(err)
 
-    return api_ok, api_total
+    return api_ok, api_total, ("; ".join(errs)[:70] or "")
+
+
+def _give_up_early(err):
+    """这个号本轮别再硬试：
+      - 限流等 N 秒且 N 超阈值（等下去就是几十分钟）
+      - 请求超时（链路/DC 有问题，再发第二个请求只会再白等一个超时）
+    """
+    if "超时" in (err or ""):
+        return True
+    m = re.match(r"限流等(\d+)秒", err or "")
+    return bool(m) and int(m.group(1)) > REPORT_FLOOD_MAX
 
 
 # ============================================================
@@ -147,9 +227,9 @@ async def report_user(username, reason_key='spam', report_text='',
     photo_id = None
     try:
         c0 = accs[0][1]
-        entity = await c0.get_entity(username)
+        entity = await asyncio.wait_for(c0.get_entity(username), timeout=REPORT_API_TIMEOUT)
         if getattr(entity, 'photo', None):
-            photos = await c0.get_profile_photos(entity, limit=1)
+            photos = await asyncio.wait_for(c0.get_profile_photos(entity, limit=1), timeout=REPORT_API_TIMEOUT)
             if photos:
                 p = photos[0]
                 photo_id = InputPhoto(id=p.id, access_hash=p.access_hash,
@@ -161,12 +241,12 @@ async def report_user(username, reason_key='spam', report_text='',
     last_update = 0
     for i, (acc_no, client, _ph) in enumerate(accs):
         try:
-            input_peer = await client.get_input_entity(username)
+            input_peer = await _resolve(client, username)
         except Exception as e:
             results.append((acc_no, f'❌ 解析失败:{str(e)[:24]}'))
             set_cooldown(acc_no)
             continue
-        api_ok, api_total = await _do_report_once(
+        api_ok, api_total, err = await _do_report_once(
             client, input_peer, reason_obj, report_text)
         if photo_id and api_ok < api_total:
             # 尝试额外加头像举报
@@ -177,7 +257,7 @@ async def report_user(username, reason_key='spam', report_text='',
                 api_ok += 1
             except Exception:
                 pass
-        _score(results, acc_no, api_ok, api_total)
+        _score(results, acc_no, api_ok, api_total, err)
         set_cooldown(acc_no)
         await _maybe_sleep(i, total, status_cb, results, "用户")
 
@@ -202,8 +282,8 @@ async def report_custom(username, reason_key, num_accounts=None,
     # 拉取目标最近消息 ID，供 MsgReportRequest 使用
     msg_ids = []
     try:
-        entity = await accs[0][1].get_entity(username)
-        msgs = await accs[0][1].get_messages(entity, limit=50)
+        entity = await asyncio.wait_for(accs[0][1].get_entity(username), timeout=REPORT_API_TIMEOUT)
+        msgs = await asyncio.wait_for(accs[0][1].get_messages(entity, limit=50), timeout=REPORT_API_TIMEOUT * 2)
         msg_ids = [m.id for m in msgs if m.id]
     except Exception:
         pass
@@ -212,16 +292,16 @@ async def report_custom(username, reason_key, num_accounts=None,
     total = len(accs)
     for i, (acc_no, client, _ph) in enumerate(accs):
         try:
-            input_peer = await client.get_input_entity(username)
+            input_peer = await _resolve(client, username)
         except Exception as e:
             results.append((acc_no, f'❌ 解析失败:{str(e)[:24]}'))
             set_cooldown(acc_no)
             continue
         n_pick = min(random.randint(1, 3), len(msg_ids)) if msg_ids else 0
         picked = random.sample(msg_ids, n_pick) if n_pick else None
-        api_ok, api_total = await _do_report_once(
+        api_ok, api_total, err = await _do_report_once(
             client, input_peer, reason_obj, report_text, msg_ids=picked)
-        _score(results, acc_no, api_ok, api_total)
+        _score(results, acc_no, api_ok, api_total, err)
         set_cooldown(acc_no)
         await _maybe_sleep(i, total, status_cb, results, "指定理由")
 
@@ -247,9 +327,9 @@ async def report_super(username, num_accounts=None, ai_cfg=None, status_cb=None)
         await status_cb('📥 正在获取目标消息...')
     try:
         client0 = accs[0][1]
-        entity = await client0.get_entity(username)
+        entity = await asyncio.wait_for(client0.get_entity(username), timeout=REPORT_API_TIMEOUT)
         name = getattr(entity, 'title', None) or getattr(entity, 'first_name', '') or username
-        messages = await client0.get_messages(entity, limit=100)
+        messages = await asyncio.wait_for(client0.get_messages(entity, limit=100), timeout=REPORT_API_TIMEOUT * 2)
     except Exception as e:
         if status_cb:
             await status_cb(f'❌ 获取目标失败: {str(e)[:60]}')
@@ -294,23 +374,24 @@ async def report_super(username, num_accounts=None, ai_cfg=None, status_cb=None)
     for i, (acc_no, client, _ph) in enumerate(accs):
         rinfo = ai_results[i]
         rk = rinfo.get('reason', 'child_abuse')
-        txt = (rinfo.get('report_text') or '')[:400]
+        txt = (rinfo.get('report_text') or '')[:REPORT_TEXT_MAX]
         robj = reason_map.get(rk, reason_map['child_abuse'])
         try:
-            input_peer = await client.get_input_entity(username)
+            input_peer = await _resolve(client, username)
         except Exception as e:
             results.append((acc_no, rk, f'❌ 解析失败:{str(e)[:24]}'))
             set_cooldown(acc_no)
             continue
         n_pick = min(random.randint(1, 3), len(msg_ids)) if msg_ids else 0
         picked = random.sample(msg_ids, n_pick) if n_pick else None
-        api_ok, api_total = await _do_report_once(client, input_peer, robj, txt, msg_ids=picked)
+        api_ok, api_total, err = await _do_report_once(client, input_peer, robj, txt, msg_ids=picked)
+        tail = f' {err}' if (api_ok < api_total and err) else ''
         if api_ok == api_total:
             res = f'✅ {api_ok}/{api_total}'
         elif api_ok > 0:
-            res = f'⚠️ {api_ok}/{api_total}'
+            res = f'⚠️ {api_ok}/{api_total}{tail}'
         else:
-            res = f'❌ 0/{api_total}'
+            res = f'❌ 0/{api_total}{tail}'
         results.append((acc_no, rk, res))
         stats[rk] = stats.get(rk, 0) + 1
         set_cooldown(acc_no)
@@ -334,13 +415,14 @@ def _resolve_reason(key):
     return item[1], item[0]
 
 
-def _score(results, acc_no, api_ok, api_total):
+def _score(results, acc_no, api_ok, api_total, err=""):
+    tail = f' {err}' if (api_ok < api_total and err) else ''
     if api_ok == api_total:
         results.append((acc_no, f'✅ {api_ok}/{api_total}'))
     elif api_ok > 0:
-        results.append((acc_no, f'⚠️ {api_ok}/{api_total}'))
+        results.append((acc_no, f'⚠️ {api_ok}/{api_total}{tail}'))
     else:
-        results.append((acc_no, f'❌ 0/{api_total}'))
+        results.append((acc_no, f'❌ 0/{api_total}{tail}'))
 
 
 async def _maybe_sleep(i, total, status_cb, results, label, keyed=False):
@@ -349,8 +431,7 @@ async def _maybe_sleep(i, total, status_cb, results, label, keyed=False):
     if i > 0 and i % 10 == 0:
         await asyncio.sleep(random.uniform(10, 30))
     done = i + 1
-    now = time.monotonic()
-    if done == total or done % 3 == 0:
+    if done % REPORT_REFRESH_EVERY == 0 or done == total:
         live = [f'[{a}] → {r}' for a, r in results[-10:]]
         if keyed:
             live = [f'[{a}] [{REASON_CN.get(k, k)}] → {r}' for a, k, r in results[-10:]]
