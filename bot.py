@@ -31,6 +31,7 @@ from db import (
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
     join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
+    collect_speakers,
     pending_joins_report,
     db_add_pool_text, db_list_pool, db_del_pool, db_clear_pool, db_pool_texts,
     pending_joins_list, verify_arm_by_tag, join_group_one_account,
@@ -1187,6 +1188,8 @@ def register_handlers(bot, accounts):
     def _menu_kb_for_action(action):
         if action in ("camp_step3",):  # 文案输入时保留群发菜单
             return campaign_menu_kb
+        if action == "camp_speakers_prompt":  # 采发言人也在群发运营里
+            return campaign_menu_kb
         if action == "add_group_prompt" or action == "batch_import_prompt":
             return groups_menu_kb
         if action == "acc_add_prompt":
@@ -1246,6 +1249,8 @@ def register_handlers(bot, accounts):
             await _finish_addgroup(event, accounts, text)
         elif action == "batch_import_prompt":
             await _finish_batchimport(event, accounts, text)
+        elif action == "camp_speakers_prompt":
+            await _finish_speakers(event, accounts, text)
         elif action == "acc_add_prompt":
             _audit(event, "acc_add", text)
             await _reply(event, f"🔄 开始添加账号 {text} …", buttons=accounts_menu_kb())
@@ -1700,6 +1705,56 @@ def register_handlers(bot, accounts):
             target = ent if ent is not None else text
             r2 = await collect_members(used or accounts[0][1], target)
             await _reply(event, r2, buttons=_groups_kb(event))
+        finally:
+            _clear_busy()
+
+    async def _finish_speakers(event, accounts, text):
+        """成员页被锁时的备用通道：从群历史消息里采「发过言的人」入名单。
+
+        只追加、不清空（不拆别人正在跑的名单）；输 t.me/xxx 后面可带翻多少条。
+        """
+        parts = (text or "").split()
+        if not parts:
+            await _reply(event, "❌ 没收到群链接。", buttons=campaign_menu_kb())
+            return
+        peer = parts[0]
+        try:
+            n = int(parts[1]) if len(parts) > 1 else 2000
+        except ValueError:
+            n = 2000
+        n = max(1, min(n, 20000))
+        if _no_accounts(event):
+            return
+        if state["busy"]:
+            await _reply(event, _busy_tip(event))
+            return
+        uid = event.sender_id
+        ok, holder = claim_list(uid, actor_name(uid), "发言人:" + peer[:40])
+        if not ok:
+            await _reply(event,
+                f"🔒 名单正被 {holder.get('name') or '其他人'} 占用"
+                f"（{holder.get('group') or '-'}）。\n"
+                "采发言人会把人追加到同一份名单里，会混进对方的目标，所以只能排队。",
+                buttons=campaign_menu_kb())
+            return
+        _audit(event, "collect_speakers", f"{peer} {n}条")
+        await _reply(event,
+                     f"🗣 正在翻「{peer}」最近 {n} 条消息采发言人…\n"
+                     f"🧹 只追加进名单，不会清空。")
+        _set_busy(uid)
+        try:
+            r = None
+            for acc_no, client, _ph in accounts:
+                r = await collect_speakers(
+                    client, peer, msg_limit=n,
+                    recent_only_days=state.get("recent_only_days", 0))
+                if not r.startswith("❌"):
+                    break   # 这个账号能看到历史，千完
+            if r is None:
+                r = "❌ 没有可用账号，无法采集"
+            await _reply(event, r, buttons=campaign_menu_kb())
+            if r.startswith("❌"):
+                release_list(uid)
         finally:
             _clear_busy()
 

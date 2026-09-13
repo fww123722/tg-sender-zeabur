@@ -123,6 +123,31 @@ async def _members_meta(client, entity):
         return 0, None, None, None
 
 
+def _target_from_user(user, my_id, recent_only_days, skipped):
+    """按「能不能群发」的标准清洗一个成员/发言人。
+
+    返回 (uid, username, access_hash) 或 None（None = 该过滤掉，已计入 skipped）。
+    拉名单与采发言人共用这一套，避免两条路出来的名单干净程度不一致。
+    """
+    if user.bot:
+        skipped["bot"] += 1
+        return None
+    if user.deleted:
+        skipped["deleted"] += 1
+        return None
+    if not user.username:
+        skipped["no_username"] += 1
+        return None
+    if my_id is not None and user.id == my_id:
+        skipped["self"] += 1
+        return None
+    # 开关：只保留近期活跃成员
+    if recent_only_days and not _is_recently_active(user, recent_only_days):
+        skipped["inactive"] += 1
+        return None
+    return (str(user.id), user.username, getattr(user, "access_hash", 0) or 0)
+
+
 async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     """从群/频道拉取成员并加入名单。"""
     try:
@@ -160,26 +185,10 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
             seen += 1
             if not isinstance(user, User):
                 continue
-            if user.bot:
-                skipped["bot"] += 1
+            item = _target_from_user(user, my_id, recent_only_days, skipped)
+            if item is None:
                 continue
-            if user.deleted:
-                skipped["deleted"] += 1
-                continue
-            if not user.username:
-                skipped["no_username"] += 1
-                continue
-            if my_id is not None and user.id == my_id:
-                skipped["self"] += 1
-                continue
-            # 开关：只保留近期活跃成员
-            if recent_only_days and not _is_recently_active(user, recent_only_days):
-                skipped["inactive"] += 1
-                continue
-            uid = str(user.id)
-            uname = user.username or ""
-            ah = getattr(user, "access_hash", 0) or 0
-            batch.append((uid, uname, ah))
+            batch.append(item)
             added += 1
             if len(batch) >= 500:
                 db_add_targets(batch)
@@ -221,7 +230,9 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
             why = (f"   ❗ 这是 Telegram 服务端的限制，不是拉取失败、也不是链接过期，"
                    f"换个普通成员号重拉照样拿不到。\n"
                    f"   ✔ 要拿全名单只有两条路：该账号在这个群里是管理员；"
-                   f"或群主关掉「显示成员」限制。\n")
+                   f"或群主关掉「显示成员」限制。\n"
+                   f"   🗣 不当管理员的退路：用「🗣 采发言人」从历史消息里"
+                   f"把说过话的人采进名单。\n")
         else:
             head = f"⚠️ 「{name}」的名单拿不全（Telegram 只放行了前面一部分）。"
             why = (f"   ❗ 不是拉取失败：超大群 Telegram 本身就不让人一次列完成员，"
@@ -244,6 +255,123 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
         if real_total and limit and real_total > limit else "")
     return (f"✅ 从「{name}」拉取完成：新增有效成员 {added} 人"
             f"{skip_msg}{recent_note}{cap_note}，名单共 {total} 人")
+
+
+async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0):
+    """从群/频道「历史消息」里采发过言的人入名单（成员页被锁时的备用通道）。
+
+    为什么走得通：成员名单是服务端就没往下发（换号也没用），但「这条消息是谁发的」
+    本来就是公开的。采到的是「活跃发言人」，不是全量成员，且只能看到本账号可见的那段历史。
+    只追加入名单，绝不清空（不拆别人正在跑的名单）。
+
+    msg_limit：翻多少条历史。越大采越全，也越容易撞限流。
+    返回文案统一用 ✅/❌ 开头，与 collect_members 一致，调用方据此判断。
+    """
+    try:
+        entity = await _resolve_entity(client, peer_arg)
+    except Exception as e:
+        return f"❌ 找不到该群/频道（采发言人前要先解析到群）: {str(e)[:120]}\n💡 用 t.me/用户名 或群 ID，且该账号需在群里。"
+
+    try:
+        me = await client.get_me()
+        my_id = me.id if me else None
+    except Exception:
+        my_id = None
+
+    name = getattr(entity, "title", str(peer_arg))
+    counts = {}   # uid -> 发言条数（越活跃越该先进名单）
+    objs = {}     # uid -> User 对象（可能是 min、缺 username）
+    msgs_read = 0
+    anon = 0      # 拿不到作者的条数（匿名发言/系统消息）
+    flood = 0
+    try:
+        async for msg in client.iter_messages(entity, limit=msg_limit):
+            msgs_read += 1
+            sid = getattr(msg, "sender_id", None)
+            if not sid:
+                anon += 1
+                continue
+            counts[sid] = counts.get(sid, 0) + 1
+            s = getattr(msg, "sender", None)
+            if isinstance(s, User) and sid not in objs:
+                objs[sid] = s
+    except FloodWaitError as e:
+        # 已经读到的那部分不丢：用本地已有的对象收尾，不再多发请求惹限流
+        flood = getattr(e, "seconds", 0) or 0
+    except Exception as e:
+        return f"❌ 读取群历史失败: {type(e).__name__}: {str(e)[:140]}"
+
+    # min 用户（只有昵称没 username）升级：挑发言最多的先试，单批 100、总量 300 锁顶，
+    # 避免几百个号逐个查反而把自己坑进 FloodWait。
+    UPGRADE_CAP = 300
+    missing = [i for i in sorted(counts, key=lambda k: -counts[k])
+               if not (isinstance(objs.get(i), User) and getattr(objs[i], "username", None))]
+    tried_upgrade = 0
+    if missing and not flood:
+        for i in range(0, min(len(missing), UPGRADE_CAP), 100):
+            chunk = missing[i:i + 100]
+            tried_upgrade += len(chunk)
+            try:
+                got = await client.get_entity([PeerUser(int(x)) for x in chunk])
+            except FloodWaitError as e:
+                flood = getattr(e, "seconds", 0) or 0
+                break
+            except Exception as e:
+                log.info(f"[发言人] 批量升级 min 用户失败(忽略): {type(e).__name__}: {e}")
+                break
+            for g in (got or []):
+                if isinstance(g, User):
+                    objs[g.id] = g
+
+    real_total, _cv, _hd, _ad = await _members_meta(client, entity)
+    batch = []
+    added = 0
+    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0}
+    for sid in sorted(counts, key=lambda k: -counts[k]):
+        u = objs.get(sid)
+        if not isinstance(u, User):
+            # min 没升级成功：光有 id 发不了，归到 no_username 这类
+            skipped["no_username"] += 1
+            continue
+        item = _target_from_user(u, my_id, recent_only_days, skipped)
+        if item is None:
+            continue
+        batch.append(item)
+        added += 1
+        if len(batch) >= 500:
+            db_add_targets(batch)
+            batch = []
+    if batch:
+        db_add_targets(batch)
+
+    total = db_count_targets()
+    parts = []
+    if skipped["bot"]:
+        parts.append(f"机器人 {skipped['bot']}")
+    if skipped["deleted"]:
+        parts.append(f"已注销 {skipped['deleted']}")
+    if skipped["no_username"]:
+        parts.append(f"拿不到可发对象 {skipped['no_username']}")
+    if skipped["self"]:
+        parts.append(f"账号自己 {skipped['self']}")
+    if skipped["inactive"]:
+        parts.append(f"久未上线 {skipped['inactive']}")
+    skip_msg = f"，已排除（{'、'.join(parts)}）" if any(skipped.values()) else ""
+    recent_note = f"（仅保留近{recent_only_days}天活跃）" if recent_only_days else ""
+    cap_note = f"（本群真实 {real_total} 人）" if real_total else ""
+    head = (f"✅ 从「{name}」历史采完：翻了 {msgs_read} 条消息，"
+            f"{len(counts)} 个不同发言人，入名单 {added} 人{skip_msg}{recent_note}"
+            f"{cap_note}，名单共 {total} 人")
+    tails = []
+    if flood:
+        tails.append(f"   ⏳ 中途撞到频率限制（需等 {flood}s），已把读到的部分入库，没浪费。")
+    if anon:
+        tails.append(f"   ℹ️ 有 {anon} 条拿不到作者（匿名发言/系统消息），已跳过。")
+    if tried_upgrade:
+        tails.append(f"   🔎 补全了 {tried_upgrade} 个只显示昵称的发言人，拿不到的那些发不了。")
+    tails.append("   ❗ 这是「活跃发言人」不是全量成员：只说过话的人在里面，"
+                 "也只能看到本账号可见的那段历史。")
+    return head + "\n" + "\n".join(tails)
 
 
 async def collect_channel_history(client, peer_arg, limit=50):

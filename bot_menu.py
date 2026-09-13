@@ -24,6 +24,8 @@ BTN = {
     "camp_step3": "② 写文案",
     "camp_start": "③ ✅ 确认开跑",
     "camp_status": "📋 查看进度",
+    # 成员页被锁时的备用入口：从历史消息采发言人
+    "camp_speakers": "🗣 采发言人(锁名单时用)",
     # 群管理子菜单
     "my_groups": "我的群",
     "add_group": "加群",
@@ -86,6 +88,7 @@ BTN_ACTION = {
     BTN["camp_step3"]: "camp_step3",
     BTN["camp_start"]: "camp_start",
     BTN["camp_status"]: "camp_status",
+    BTN["camp_speakers"]: "camp_speakers_prompt",
     BTN["my_groups"]: "my_groups",
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
@@ -140,6 +143,7 @@ INPUT_ACTIONS = {
     "pool_add_prompt",  # 文案池：输入一条文案
     "rep_user_prompt",  # 举报用户：输入用户名/链接
     "rep_channel_ai_prompt",  # AI批量：输入频道/群组
+    "camp_speakers_prompt",  # 采发言人：输入群链接（可带条数）
 }
 
 INPUT_HINTS = {
@@ -154,6 +158,10 @@ INPUT_HINTS = {
     "pool_add_prompt": "请发送要存入文案池的内容（一次一条）：",
     "rep_user_prompt": "请发送要举报的用户/频道（@username 或 t.me/xxx）：",
     "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
+    "camp_speakers_prompt": (
+        "请发送群链接或群ID（t.me/xxx 或 数字ID）：\n"
+        "可以在后面加要翻的历史条数，例：t.me/xxx 3000\n"
+        "不写默认 2000 条（上限 20000）。只追加进名单，不清空。"),
 }
 
 
@@ -189,11 +197,12 @@ def main_menu_kb(is_operator: bool = False):
 
 
 def campaign_menu_kb():
-    """群发运营菜单（新版）：选群 / 写文案 / 确认开跑 + 进度控制"""
+    """群发运营菜单（新版）：选群 / 写文案 / 确认开跑 + 进度控制 + 采发言人备用"""
     return _kb([
         (BTN["camp_step1"], BTN["camp_step3"]),
         (BTN["camp_start"],),
         (BTN["camp_status"], BTN["pause"], BTN["resume"], BTN["stop"]),
+        (BTN["camp_speakers"],),
         (BTN["back"],),
     ])
 
@@ -405,6 +414,8 @@ def campaign_menu_text():
         "① 选群 — 选群并自动拉成员\n"
         "② 写文案 — 直接发文案（支持 HTML）\n"
         "③ 确认开跑 — 自动检查账号后开跑\n\n"
+        "🗣「采发言人」：群把成员页锁成只显示管理员时用的——改成翻历史消息，"
+        "把说过话的人采进名单（只追加不清空）。\n\n"
         "进度只在一条消息上更新；可暂停/继续/停止。"
     )
 
