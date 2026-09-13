@@ -35,9 +35,12 @@ O.DB.load_session = staticmethod(lambda name: STORE.get(name))
 O.DB.save_session = staticmethod(lambda name, data: STORE.__setitem__(name, data))
 
 import collector as C  # noqa: E402
+import verify_relay as VR  # noqa: E402
 from telethon.tl.types import ChatInviteAlready  # noqa: E402
 
 C.db_add_group = lambda *a, **k: None  # 不写库
+# 中继只验「有没有开窗」，不真发消息：给个假 bot，把推送吸收掉
+VR.set_bot(None)
 
 FAILS = []
 
@@ -58,6 +61,13 @@ class AlreadyIn(C.UserAlreadyParticipantError):
     def __init__(self):
         Exception.__init__(self)
         self.message = "USER_ALREADY_PARTICIPANT"
+
+
+class Expired(C.InviteHashExpiredError):
+    """INVITE_HASH_EXPIRED——开了验证的私密群经常回这个，是假报错。"""
+
+    def __init__(self):
+        self.message = "INVITE_HASH_EXPIRED"
 
 
 class Obj:
@@ -197,6 +207,34 @@ async def main():
     ck("Q1 🔒也算收手并回文案", body.startswith("🔒"), body[:120])
     ck("Q1 标出使用账号", "121" in body, body[:160])
     ck("Q1 无实体(调用方据此跳过拉人)", entQ is None, entQ)
+
+    # ---------- E1 私密群要验证但 Import 报「链接过期」：必须改判 🔒 ----------
+    cE = FakeClient("140", import_behaviour=Expired(),
+                    check_result=Obj(title="隐蔽验证群", bot_verification=Obj(),
+                                     request_needed=None))
+    tE, eE = await C.join_group_by_link(cE, "https://t.me/+EEE999", acc="140")
+    ck("E1 不误报❌，改判🔒", tE.startswith("🔒") and "过期" not in tE.split("\n")[0], tE[:120])
+    ck("E1 说清「过期」是假报错", "假报错" in tE, tE[:160])
+    ck("E1 无实体", eE is None, eE)
+    ck("E1 记在途 kind=verify",
+       (C._pending_get("https://t.me/+EEE999", cE, "140") or {}).get("kind") == "verify",
+       C._pending_get("https://t.me/+EEE999", cE, "140"))
+    ck("E1 开了验证中继",
+       "140" in VR._armed and VR._armed["140"]["title"] == "隐蔽验证群",
+       list(VR._armed))
+    ck("E1 只 Import 一次就收手", cE.calls["ImportChatInviteRequest"] == 1, cE.calls)
+
+    # ---------- E2 真过期（预检查看不到验证）：仍报 ❌，不许假装 🔒 ----------
+    cF = FakeClient("141", import_behaviour=Expired(),
+                    check_result=Obj(title="死群", bot_verification=None, request_needed=None))
+    tF, _ = await C.join_group_by_link(cF, "https://t.me/+FFF000", acc="141")
+    ck("E2 无验证标志时仍报❌过期", tF.startswith("❌") and "已过期" in tF, tF[:120])
+    ck("E2 不误开中继", "141" not in VR._armed, list(VR._armed))
+
+    # ---------- E3 预检查也挂（返回 None）：保守报❌，不猜 ----------
+    cG = FakeClient("142", import_behaviour=Expired(), check_result=None)
+    tG, _ = await C.join_group_by_link(cG, "https://t.me/+GGG111", acc="142")
+    ck("E3 预检查失败时不升级为🔒", tG.startswith("❌"), tG[:120])
 
     # ---------- 已在群里：清在途 ----------
     cD = FakeClient("130", import_behaviour=AlreadyIn(),

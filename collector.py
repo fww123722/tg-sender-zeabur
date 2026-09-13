@@ -848,6 +848,23 @@ async def join_group_by_link(client, link, acc=None):
             except (InviteHashExpiredError, InviteHashInvalidError) as e:
                 log.warning(f"[加群] ImportChatInvite 报 {type(e).__name__} "
                             f"hash={invite_hash} {_decode_invite_hash(invite_hash)}", exc_info=True)
+                # 坑：开了入群验证的私密群，ImportChatInvite 也经常回
+                # INVITE_HASH_EXPIRED，直接报「链接过期」是误判（老板看到的
+                # 「要验证就加不进去」就是这条）。先只读预检查一次，把真门槛验出来。
+                chk = await _peek_invite(client, invite_hash)
+                if _invite_gate(chk) == "verify":
+                    t = getattr(chk, "title", None) or getattr(
+                        getattr(chk, "chat", None), "title", None) or "该群"
+                    _pending_remember(link, client, t, kind="verify", acc=acc)
+                    _verify_arm(client, link, t, acc=acc)
+                    log.info(f"[加群] 「{t}」Import 报 {type(e).__name__}，"
+                             f"但预检查显示需人工验证，改判 🔒（不再误报链接过期）")
+                    return (f"🔒 「{t}」开了入群验证，需要你本人过一道（抢题/按钮）。\n"
+                            f"   我不会代你抢——这是 Telegram 专门拦自动加群的门槛。\n"
+                            f"   刚才报的「链接过期」是假报错：验证群就是会这么回。\n"
+                            f"   📡 已开「盯验证消息」：验证机器人的原话和按钮会自动转到本会话，\n"
+                            f"      你点哪个我只提交哪个（一次只提交一次，不重复、不自作主张）。\n"
+                            f"   验证过了再发一次同一链接，就会自动入表+拉名单。", None)
                 kind = "已过期" if isinstance(e, InviteHashExpiredError) else "无效"
                 return (f"❌ 加入失败：Telegram 判定该邀请链接{kind}（{type(e).__name__}）\n"
                         f"💡 如果是刚生成的链接还报这个，通常是：链接设了有效期/次数已用完，\n"
