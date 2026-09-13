@@ -1434,14 +1434,28 @@ def register_handlers(bot, accounts):
                 f"🧹 已清空旧名单（{cleared} 人）\n"
                 f"🔄 正在拉取成员到名单…")
             r = None
+            tried = 0
+            best = -1
+            # ❌ = 这个账号不在群里/找不到群 → 换下一个；
+            # ⚠️ = 名单被服务端挡住（成员页只显示管理员 / 超大群列不全）——
+            #      旧逻辑碰到 ⚠️ 也直接 break，后面的账号根本没试过，
+            #      而后面某个账号很可能在这个群里是管理员，能拿全。
+            # ✅ = 拿全了，立刻收工。
             for acc_no, client, _ph in accounts:
-                r = await collect_members(client, target,
-                                         recent_only_days=state.get("recent_only_days", 0))
-                if not r.startswith("❌"):
+                tried += 1
+                before = db_count_targets()
+                rr = await collect_members(client, target,
+                                          recent_only_days=state.get("recent_only_days", 0))
+                got = db_count_targets() - before   # 不拆文案里的数字，直接看库里进了多少
+                if r is None or got > best:
+                    r, best = rr, got
+                if rr.startswith("✅"):
                     break
-                # 该账号找不到群，换下一个账号
             if r is None:
                 r = "❌ 没有可用账号，无法拉取"
+            elif r.startswith("⚠️") and tried > 1:
+                r += (f"\n   ↪ 已换过 {tried} 个账号，都没能看全；"
+                      f"名单最终累计 {db_count_targets()} 人。")
             await _reply(event, r)
             if r.startswith("❌"):
                 release_list(uid)

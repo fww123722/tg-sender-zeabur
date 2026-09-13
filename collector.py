@@ -16,6 +16,8 @@ from telethon.errors import (
 )
 from ops_state import get as ops_get, set as ops_set
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.messages import GetFullChatRequest
 from telethon.tl.functions.messages import (
     CheckChatInviteRequest, ImportChatInviteRequest, DeleteChatUserRequest,
 )
@@ -97,6 +99,30 @@ async def _resolve_entity(client, peer_arg):
         raise first_err
 
 
+async def _members_meta(client, entity):
+    """查这个群「真实成员数」+「当前账号能不能看全名单」。
+
+    返回 (total, can_view, hidden, admins)：拿不到就是全 0/None，绝不抛异常。
+    total 来自 ChatFull.participants_count——这个数是服务端统计，不受
+    「成员页只显示管理员」影响，所以能拿来判断我们是不是只读到了一角。
+    """
+    try:
+        if isinstance(entity, Channel):
+            full = (await client(GetFullChannelRequest(entity))).full_chat
+        elif isinstance(entity, Chat):
+            full = (await client(GetFullChatRequest(entity.id))).full_chat
+        else:
+            return 0, None, None, None
+        total = int(getattr(full, "participants_count", 0) or 0)
+        can_view = getattr(full, "can_view_participants", None)
+        hidden = getattr(full, "participants_hidden", None)
+        admins = int(getattr(full, "admins_count", 0) or 0)
+        return total, can_view, hidden, admins
+    except Exception as e:
+        log.warning(f"[名单] 查成员总数失败(忽略): {type(e).__name__}: {e}")
+        return 0, None, None, None
+
+
 async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     """从群/频道拉取成员并加入名单。"""
     try:
@@ -124,10 +150,14 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
         my_id = None
     batch = []
     added = 0
+    seen = 0          # Telegram 实际下发了多少条（含被排除的），用来识破「只给管理员」
+    # 这个群到底多少人、本账号有没有权限看全（拿不到就是 0/None）
+    real_total, can_view, hidden, admins_n = await _members_meta(client, entity)
     skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0}
     try:
         async for user in client.iter_participants(entity, limit=limit):
             # 排除：非用户对象 / 机器人 / 已注销(删除) / 无用户名 / 账号自己
+            seen += 1
             if not isinstance(user, User):
                 continue
             if user.bot:
@@ -176,7 +206,44 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
             parts.append(f"久未上线 {skipped['inactive']}")
         skip_msg = f"，已排除（{('、'.join(parts))}）"
     recent_note = f"（仅保留近{recent_only_days}天活跃）" if recent_only_days else ""
-    return f"✅ 从「{name}」拉取完成：新增有效成员 {added} 人{skip_msg}{recent_note}，名单共 {total} 人"
+    # 读到的数远少于服务端统计的真实人数：肯定有东西把名单拦住了一半以上。
+    # 拦住的原因有两种，文案分开说，别一律推给「只显示管理员」：
+    #   A) 只读到个位数且不超管理员数 -> 群主把成员页设成只显示管理员（老板碰到的就是这个）
+    #   B) 读到一大批但仍远少于一万-> 超大群本身列举不全部（Telegram 只给前面那部分）
+    # seen 撞上 limit 是被自家上限截断（正常截短，不算被限制），所以要看 seen < limit。
+    if real_total and seen < max(1, int(real_total * 0.9)) and seen < limit:
+        acc = getattr(client, "phone", None) or "?"
+        log.info(f"[名单] 「{name}」只读到 {seen}/{real_total}，名单拿不全"
+                 f"(can_view={can_view} hidden={hidden} admins={admins_n}) acc={acc}")
+        only_admins = bool(admins_n) and seen <= admins_n
+        if only_admins:
+            head = f"⚠️ 「{name}」把成员页设成了只显示管理员。"
+            why = (f"   ❗ 这是 Telegram 服务端的限制，不是拉取失败、也不是链接过期，"
+                   f"换个普通成员号重拉照样拿不到。\n"
+                   f"   ✔ 要拿全名单只有两条路：该账号在这个群里是管理员；"
+                   f"或群主关掉「显示成员」限制。\n")
+        else:
+            head = f"⚠️ 「{name}」的名单拿不全（Telegram 只放行了前面一部分）。"
+            why = (f"   ❗ 不是拉取失败：超大群 Telegram 本身就不让人一次列完成员，"
+                   f"而普通成员也看不到完整名单。\n"
+                   f"   ✔ 要更多人的话：用「按关键字搜成员」分批拉，或该账号当上管理员。\n")
+        tip = []
+        if admins_n:
+            tip.append(f"其中管理员 {admins_n} 人")
+        if can_view is False or hidden:
+            tip.append("Telegram 已标记成员列表不可见")
+        return (
+            head + "\n"
+            f"   群里真实 {real_total} 人，本次只读到 {seen} 人"
+            + (f"（{'、'.join(tip)}）" if tip else "")
+            + f"，已入表 {added} 人。\n"
+            + why
+            + f"   💡 名单共 {total} 人，可以先拿这部分跑群发。")
+    cap_note = (
+        f"（本群 {real_total} 人，受单次上限 {limit} 人限制）"
+        if real_total and limit and real_total > limit else "")
+    return (f"✅ 从「{name}」拉取完成：新增有效成员 {added} 人"
+            f"{skip_msg}{recent_note}{cap_note}，名单共 {total} 人")
 
 
 async def collect_channel_history(client, peer_arg, limit=50):
