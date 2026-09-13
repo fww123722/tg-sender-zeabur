@@ -3,6 +3,7 @@
 """采集模块：拉取群成员、加入群组、采集频道历史消息（文案池）。"""
 import re
 import random
+import time
 import asyncio
 
 from telethon import TelegramClient
@@ -13,6 +14,7 @@ from telethon.errors import (
     InviteRequestSentError,
     UserAlreadyParticipantError,
 )
+from ops_state import get as ops_get, set as ops_set
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.messages import (
     CheckChatInviteRequest, ImportChatInviteRequest, DeleteChatUserRequest,
@@ -467,15 +469,43 @@ def _decode_invite_hash(h):
         return f"?({type(e).__name__})"
 
 
-async def _peek_invite_title(client, invite_hash):
-    """只在需要群名时尝试预检查取标题；失败一律吞掉（预检查对新链接可能误报 expired）。"""
+async def _peek_invite(client, invite_hash):
+    """预检查取邀请详情（拿群名 + 判断群侧开了哪种门槛）。
+    失败一律吞掉返回 None：新版 t.me/+xxx 链接在 CheckChatInvite 阶段会被误报 expired，
+    所以预检查只能在「加入动作已经失败/需补充信息」时用作参考，绝不能当成败依据。"""
     try:
-        check = await client(CheckChatInviteRequest(invite_hash))
+        return await client(CheckChatInviteRequest(invite_hash))
     except Exception as e:
-        log.info(f"[加群] 预检查取标题失败(忽略): {type(e).__name__}")
+        log.info(f"[加群] 预检查失败(忽略): {type(e).__name__}")
+        return None
+
+
+async def _peek_invite_title(client, invite_hash):
+    check = await _peek_invite(client, invite_hash)
+    if check is None:
         return None
     chat = getattr(check, "chat", None)
     return getattr(chat, "title", None) or getattr(check, "title", None)
+
+
+def _invite_gate(check) -> str:
+    """从预检查结果判断群侧门槛：'verify'(需人工验证/答题) | 'request'(需批准) | ''(未知)。"""
+    if check is None:
+        return ""
+    if getattr(check, "bot_verification", None):
+        return "verify"
+    if getattr(check, "request_needed", False):
+        return "request"
+    return ""
+
+
+def _err_gate(err) -> str:
+    """从异常类型判断是不是「要人工验证」这类（只识别，不尝试绕过）。
+    注意只，得窄：子串写宽了会把 BotInvalidError / PremiumAccountRequired 之类误判成验证。"""
+    name = type(err).__name__
+    if any(k in name for k in ("Captcha", "Verif", "Screenshot")):
+        return "verify"
+    return ""
 
 
 async def _probe_chat_state(client, title_hint=None, gid_hint=None):
@@ -502,6 +532,124 @@ async def _probe_chat_state(client, title_hint=None, gid_hint=None):
         return f"查询失败 {type(e).__name__}: {e}"
 
 
+# ---------------- 待批准的入群申请（A：需群主批准 / C：需人工验证）----------------
+# 为什么要记账：Telegram 的入群申请重复提交会给群主刷屏、也容易被判骚扰；
+# 而且「批准通过后」再发同一链接，正确反应应该是认出已通过并开始拉人，
+# 不是再发一次申请。所以把在途申请存下来（按 邀请hash/群token + 账号 记）。
+K_PENDING_JOINS = "pending_joins"
+PENDING_JOIN_TTL = 7 * 86400  # 7 天后不再当在途处理（申请早凉透了）
+
+
+def _acc_tag(client, acc=None) -> str:
+    """账号标识：调用方传的用者传的（phone/uid），否则 client.phone，再否则 '?'。
+    绝不能抛异常；但也不能轻易返 '?'——多账号都撞在 '?' 上会让 A 号的申请挡住 B 号。"""
+    if acc:
+        return str(acc)
+    try:
+        p = getattr(client, "phone", None)
+        if p:
+            return str(p)
+    except Exception:
+        pass
+    try:
+        uid = getattr(getattr(client, "me", None), "id", None)
+        if uid:
+            return str(uid)
+    except Exception:
+        pass
+    return "?"
+
+
+def _pending_key(link, client, acc=None) -> str:
+    """在途申请的键 = 链接指纹 + 账号，避免 A 账号的申请挡住 B 账号。"""
+    m = re.search(r"t\.me/(?:joinchat/|\+)?([A-Za-z0-9_\-]+)", link or "")
+    token = m.group(1) if m else (link or "").strip()
+    return f"{token}@{_acc_tag(client, acc)}"
+
+
+def _pending_load() -> dict:
+    """读在途申请表；DB 抽风时当成空表，绝不让记账逻辑搞挂加群主流程。"""
+    try:
+        data = ops_get(K_PENDING_JOINS)
+    except Exception as e:
+        log.info(f"[加群] 读在途申请失败(忽略): {type(e).__name__}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pending_save(data: dict):
+    try:
+        ops_set(K_PENDING_JOINS, data)
+    except Exception as e:
+        log.info(f"[加群] 写在途申请失败(忽略): {type(e).__name__}")
+
+
+def _pending_remember(link, client, title="", kind="request", acc=None):
+    """kind: request=等群主批准 | verify=等人工验证（不自动过，只挂起）。"""
+    data = _pending_load()
+    now = int(time.time())
+    data[_pending_key(link, client, acc)] = {
+        "at": now,
+        "kind": kind,
+        "title": title or "",
+        "link": link or "",
+    }
+    # 顺手清掉过期项，别让表无限膨胀
+    data = {k: v for k, v in data.items()
+            if isinstance(v, dict) and now - int(v.get("at") or 0) < PENDING_JOIN_TTL}
+    _pending_save(data)
+
+
+def _pending_get(link, client, acc=None):
+    data = _pending_load()
+    if not data:
+        return None
+    k = _pending_key(link, client, acc)
+    v = data.get(k)
+    if not isinstance(v, dict):
+        return None
+    try:
+        age = int(time.time()) - int(v.get("at") or 0)
+    except (TypeError, ValueError):
+        age = PENDING_JOIN_TTL + 1
+    if age >= PENDING_JOIN_TTL:
+        data.pop(k, None)
+        _pending_save(data)
+        return None
+    return v
+
+
+def _pending_forget(link, client, acc=None):
+    data = _pending_load()
+    k = _pending_key(link, client, acc)
+    if k in data:
+        data.pop(k, None)
+        _pending_save(data)
+        return True
+    return False
+
+
+def pending_joins_report() -> str:
+    """列出所有在途申请（供「加群」复查用）。"""
+    data = _pending_load()
+    now = int(time.time())
+    rows = [(k, v) for k, v in data.items() if isinstance(v, dict)
+            and now - int(v.get("at") or 0) < PENDING_JOIN_TTL]
+    if not rows:
+        return "没有在途的入群申请。"
+    rows.sort(key=lambda kv: int(kv[1].get("at") or 0))
+    lines = [f"【在途入群申请 {len(rows)} 条】"]
+    for k, v in rows:
+        token, _, acc = k.partition("@")
+        mins = max(0, (now - int(v.get("at") or 0)) // 60)
+        if v.get("kind") == "verify":
+            lines.append(f"  🔒 「{v.get('title') or '?'}」 账号{acc} 需人工验证，已挂起{mins}分钟")
+        else:
+            lines.append(f"  ⏳ 「{v.get('title') or '?'}」 账号{acc} 等批准{mins}分钟")
+    lines.append("💡 批准后/验证后，再点一次「加群」发同一链接：通过就自动入表+拉名单。")
+    return "\n".join(lines)
+
+
 async def join_group_all_accounts(accounts, link):
     """逐账号尝试加群，谁加得上用谁；全失败时列出每个账号的错。
     用途：区分「链接/群侧失效（两账号同错）」还是「单账号被限制（错不同）。"""
@@ -509,14 +657,14 @@ async def join_group_all_accounts(accounts, link):
     for idx, (acc_no, client, phone) in enumerate(accounts):
         tag = getattr(client, "phone", None) or phone or f"账号{acc_no}"
         try:
-            txt, ent = await join_group_by_link(client, link)
+            txt, ent = await join_group_by_link(client, link, acc=tag)
         except Exception as e:
             log.warning(f"[加群] 账号{acc_no} 异常 {type(e).__name__}: {e}", exc_info=True)
             txt, ent = f"❌ {type(e).__name__}: {e}", None
         first = str(txt).splitlines()[0][:100]
         log.info(f"[加群] 账号{acc_no}({tag}) 结果: {first}")
         lines.append((tag, first, ent, client))
-        if first.startswith("✅") or first.startswith("⏳"):
+        if first.startswith("✅") or first.startswith("⏳") or first.startswith("🔒"):
             failed = [(t, m) for t, m, _, _ in lines[:-1]]
             note = ""
             if failed:
@@ -548,9 +696,10 @@ async def join_group_all_accounts(accounts, link):
     return (body, lines[0][2], lines[0][3])
 
 
-async def join_group_by_link(client, link):
+async def join_group_by_link(client, link, acc=None):
     """让账号通过群链接加入群/频道（支持私密邀请链接与公开群，支持需批准入群）。
-    加群成功后自动读取群信息并存入 groups_info 表。"""
+    加群成功后自动读取群信息并存入 groups_info 表。
+    acc: 调用方传入的账号标识（phone/uid），用于在途申请记账区分账号；不传则从 client 推。"""
     raw = link
     link = (link or "").strip().strip("<>").strip()
     priv_m = re.search(r"t\.me/(?:joinchat/|\+)([A-Za-z0-9_\-]+)", link)
@@ -567,6 +716,29 @@ async def join_group_by_link(client, link):
     try:
         if priv_m:
             invite_hash = priv_m.group(1)
+            pend = _pending_get(link, client, acc)
+            if pend:
+                # 之前已经发过申请/被验证拦过：先查进没进来，绝不默默重发（重发=给群主刷屏+被判骚扰）
+                check = await _peek_invite(client, invite_hash)
+                already = getattr(check, "chat", None) if isinstance(check, ChatInviteAlready) else None
+                if already is not None:
+                    _pending_forget(link, client, acc)
+                    await _save_group_info(client, already)
+                    log.info(f"[加群] ✅ 批准已通过 title={getattr(already, 'title', None)}")
+                    return (f"✅ 「{getattr(already, 'title', None) or pend.get('title') or '群'}」已批准入群，可以拉名单了", already)
+                gate = _invite_gate(check)
+                t = pend.get("title") or getattr(check, "title", None)
+                mins = ""
+                try:
+                    mins = f"（已等 {max(0, int(time.time()) - int(pend.get('at') or 0)) // 60} 分钟）"
+                except (TypeError, ValueError):
+                    pass
+                if pend.get("kind") == "verify" or gate == "verify":
+                    return (f"🔒 「{t or '该群'}」开了入群验证，需要你本人在手机/电脑官方客户端用这个号点一次验证（答题/按钮）。\n"
+                            f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
+                            f"   验证过了再发一次同一链接，就会自动入表+拉名单。", None)
+                return (f"⏳ 「{t or '该群'}」的入群申请已在途{mins}，未重复提交。\n"
+                        f"   等群主/管理员在「群设置 → 管理员 → 入群申请」里批准后，再发一次同一链接即可入表+拉名单。", None)
             log.info(f"[加群] 邀请hash={invite_hash} {_decode_invite_hash(invite_hash)} "
                      f"→ 直接执行加入(不再预检查，预检查对新链接会误报 expired)")
             # 关键修正：旧顺序是先 CheckChatInvite 再 Import，而新版 t.me/+xxx 链接
@@ -576,9 +748,12 @@ async def join_group_by_link(client, link):
                 res = await client(ImportChatInviteRequest(invite_hash))
             except InviteRequestSentError:
                 t = await _peek_invite_title(client, invite_hash)
+                _pending_remember(link, client, t, kind="request", acc=acc)
                 log.info(f"[加群] 「{t}」需群主批准，申请已发送")
-                return (f"⏳ 已向「{t or '该群'}」发送入群申请，等待群主批准", None)
+                return (f"⏳ 已向「{t or '该群'}」发送入群申请，等待群主批准。\n"
+                        f"   批准后请再发一次同一链接，会自动入表+拉名单（不会重复提交申请）。", None)
             except UserAlreadyParticipantError:
+                _pending_forget(link, client, acc)
                 t = await _peek_invite_title(client, invite_hash)
                 ent = await _find_dialog_by_title(client, t)
                 if ent:
@@ -598,6 +773,7 @@ async def join_group_by_link(client, link):
                 t = await _peek_invite_title(client, invite_hash)
                 ent = await _find_dialog_by_title(client, t)
             if ent:
+                _pending_forget(link, client, acc)
                 await _save_group_info(client, ent)
             log.info(f"[加群] ✅ ImportChatInvite 成功 title={t} entity={'有' if ent else '无'}")
             return (f"✅ 已成功加入「{t or '群'}」", ent)
@@ -611,20 +787,45 @@ async def join_group_by_link(client, link):
                         f"错误: {type(e).__name__}\n"
                         f"提示：私密群请用 t.me/xxxx 完整邀请链接（带 + 号或 joinchat/）；"
                         f"若账号不在该群，无法用纯数字 ID 解析。", None)
+            title0 = getattr(entity, "title", None) or token
             log.info(f"[加群] 解析到实体 id={getattr(entity, 'id', '?')} "
                      f"type={type(entity).__name__} title={getattr(entity, 'title', None)} "
-                     f"megagroup={getattr(entity, 'megagroup', None)} broadcast={getattr(entity, 'broadcast', None)}")
+                     f"megagroup={getattr(entity, 'megagroup', None)} broadcast={getattr(entity, 'broadcast', None)} "
+                     f"join_request={getattr(entity, 'join_request', None)} "
+                     f"bot_verify={bool(getattr(entity, 'bot_verification_icon', None))}")
+            # C：开了入群验证（机器人/答题）——只识别+挂起，不尝试代过
+            if getattr(entity, "bot_verification_icon", None):
+                _pending_remember(link, client, title0, kind="verify", acc=acc)
+                log.info(f"[加群] 「{title0}」需人工验证，已挂起")
+                return (f"🔒 「{title0}」开了入群验证，需要你本人在手机/电脑官方客户端用这个号点一次验证（答题/按钮）。\n"
+                        f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
+                        f"   验证过了再发一次同一链接，就会自动入表+拉名单。", None)
+            pend = _pending_get(link, client, acc)
+            if pend:
+                # 已发过申请：不重复提交（重发=给群主刷屏+被判骚扰）
+                if pend.get("kind") == "verify":
+                    return (f"🔒 「{title0}」需人工验证，等你用这个号在官方客户端点过一次后再发同一链接。", None)
+                try:
+                    mins = f"（已等 {max(0, int(time.time()) - int(pend.get('at') or 0)) // 60} 分钟）"
+                except (TypeError, ValueError):
+                    mins = ""
+                return (f"⏳ 「{title0}」的入群申请已在途{mins}，未重复提交。\n"
+                        f"   群主批准后，再发一次同一链接即可入表+拉名单。", None)
             try:
                 await client(JoinChannelRequest(entity))
                 title, cnt = await _save_group_info(client, entity)
+                _pending_forget(link, client, acc)
                 log.info(f"[加群] ✅ 成功加入「{title}」成员{cnt}")
                 return (f"✅ 已成功加入「{title}」，成员 {cnt} 人", entity)
             except UserAlreadyParticipantError:
                 title, cnt = await _save_group_info(client, entity)
+                _pending_forget(link, client, acc)
                 return (f"✅ 已在「{title}」中，成员 {cnt} 人", entity)
             except InviteRequestSentError:
-                log.info(f"[加群] 「{getattr(entity, 'title', token)}」需批准")
-                return (f"⏳ 已向「{getattr(entity, 'title', token)}」发送入群申请，等待批准", None)
+                _pending_remember(link, client, title0, kind="request", acc=acc)
+                log.info(f"[加群] 「{title0}」需批准，申请已发送")
+                return (f"⏳ 已向「{title0}」发送入群申请，等待群主批准。\n"
+                        f"   批准后请再发一次同一链接，会自动入表+拉名单（不会重复提交申请）。", None)
         else:
             log.warning(f"[加群] 无法识别链接格式: {raw!r}")
             return (f"❌ 无法识别的群链接: {link}\n"
@@ -636,5 +837,15 @@ async def join_group_by_link(client, link):
         log.warning(f"[加群] FloodWait {e.seconds}s (request={getattr(e, 'request', '?')})")
         return (f"⏳ 操作过于频繁，请 {e.seconds} 秒后再试", None)
     except Exception as e:
+        # C：Telethon 把验证码/机器人验证类错误直接抛出来时，也只识别+挂起，不代过
+        if _err_gate(e) == "verify":
+            try:
+                _pending_remember(link, client, "", kind="verify", acc=acc)
+            except Exception:
+                pass
+            log.info(f"[加群] 碰人工验证类错误 {type(e).__name__}，已挂起不硬撞")
+            return (f"🔒 这个群要人工验证（{type(e).__name__}），需要你本人在手机/电脑官方客户端用这个号过一道。\n"
+                    f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
+                    f"   过了再发一次同一链接，就会自动入表+拉名单。", None)
         log.warning(f"[加群] ❌ 异常 {type(e).__name__}: {e} (输入={raw!r})", exc_info=True)
         return (f"❌ 加入失败: {type(e).__name__}: {e}", None)

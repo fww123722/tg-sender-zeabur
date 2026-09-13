@@ -28,6 +28,7 @@ BTN = {
     "my_groups": "我的群",
     "add_group": "加群",
     "batch_import": "批量导入",
+    "pending_joins": "📨 在途申请",
     "del_group": "🗑 删除群",
     "del_confirm": "⚠️ 确认退群并删除",
     "del_cancel": "↩️ 取消",
@@ -88,6 +89,7 @@ BTN_ACTION = {
     BTN["my_groups"]: "my_groups",
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
+    BTN["pending_joins"]: "pending_joins",
     BTN["del_group"]: "del_group_menu",
     BTN["del_confirm"]: "del_confirm",
     BTN["del_cancel"]: "del_cancel",
@@ -252,12 +254,13 @@ def groups_menu_kb(is_operator: bool = False):
     if is_operator:
         return _kb([
             (BTN["my_groups"], BTN["add_group"]),
-            (BTN["batch_import"],),
+            (BTN["batch_import"], BTN["pending_joins"]),
             (BTN["back"],),
         ])
     return _kb([
         (BTN["my_groups"], BTN["add_group"]),
         (BTN["batch_import"], BTN["del_group"]),
+        (BTN["pending_joins"],),
         (BTN["back"],),
     ])
 
@@ -408,6 +411,7 @@ def campaign_menu_text():
 
 def groups_menu_text(is_operator: bool = False):
     return ("📥 群管理\n\n查看已加入的群、加群、批量导入、删除群记录。\n"
+            "📨「在途申请」= 等群主批准 / 等你人工验证的群，批准后发回同一链接即可。\n"
             "⚠️「删除群」会让账号先退群再删记录，不可逆。")
 
 

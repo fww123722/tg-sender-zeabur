@@ -31,6 +31,7 @@ from db import (
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
     join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
+    pending_joins_report,
     db_add_pool_text, db_list_pool, db_del_pool, db_clear_pool, db_pool_texts,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
@@ -626,6 +627,8 @@ def register_handlers(bot, accounts):
             if _no_accounts(event):
                 return
             await _reply(event, await list_my_groups(accounts[0][1]), buttons=_groups_kb(event))
+        elif action == "pending_joins":
+            await _reply(event, pending_joins_report(), buttons=_groups_kb(event))
         elif action == "del_group_menu":
             groups = db_get_all_groups()
             if not groups:
@@ -1496,7 +1499,13 @@ def register_handlers(bot, accounts):
             await _reply(event, r)
             if not r.startswith("✅"):
                 if r.startswith("⏳"):
-                    await _reply(event, "群主批准后再点一次「加群」发同一链接，即可入表+拉名单。", buttons=_groups_kb(event))
+                    await _reply(event,
+                        "📨 已记入「在途申请」。群主批准后再点一次「加群」发同一链接，\n"
+                        "    会自动入表+拉名单，不会重复提交申请。", buttons=_groups_kb(event))
+                elif r.startswith("🔒"):
+                    await _reply(event,
+                        "🔒 这类群开了人工验证，只能你本人在官方客户端用该号点一次。\n"
+                        "    已记入「在途申请」，验证后发回同一链接即可。", buttons=_groups_kb(event))
                 return
             await _reply(event, "正在读取群成员到名单…")
             # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
@@ -1527,6 +1536,11 @@ def register_handlers(bot, accounts):
                     r1, ent, used = await join_group_all_accounts(accounts, link)
                 except Exception:
                     r1, ent, used = "加群失败", None, None
+                # 没真正进群（⏳等批准 / 🔒需验证 / ❌失败）时绝不往下拉人：
+                # 旧逻辑拿一次性邀请链接去 _resolve_entity，必然报「找不到该群」，看着像失败
+                if not str(r1).startswith("✅"):
+                    await _reply(event, f"[{i}/{len(links)}] {link}\n{r1}\n⏭ 未进群，跳过拉名单")
+                    continue
                 try:
                     r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
                                            recent_only_days=state.get("recent_only_days", 0))
@@ -1555,6 +1569,17 @@ def register_handlers(bot, accounts):
         try:
             r, ent, used = await join_group_all_accounts(accounts, link)
             await _reply(event, r)
+            if not str(r).startswith("✅"):
+                # 同上：未进群不去拉名单，避免报出「找不到该群」这种误导性错误
+                if str(r).startswith("⏳"):
+                    await _reply(event,
+                        "📨 已记入「在途申请」，群主批准后发回同一链接即可入表+拉名单。",
+                        buttons=_main_kb(event))
+                elif str(r).startswith("🔒"):
+                    await _reply(event,
+                        "🔒 需你本人在官方客户端过一次验证，之后发回同一链接即可。",
+                        buttons=_main_kb(event))
+                return
             r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
                                      recent_only_days=state.get("recent_only_days", 0))
             await _reply(event, r2, buttons=_main_kb(event))
