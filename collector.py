@@ -629,6 +629,89 @@ def _pending_forget(link, client, acc=None):
     return False
 
 
+def pending_joins_list():
+    """供内联键盘用的结构化在途申请清单（按时间升序）。"""
+    data = _pending_load()
+    now = int(time.time())
+    rows = []
+    for k, v in sorted(data.items(), key=lambda kv: int(kv[1].get("at") or 0)
+                       if isinstance(kv[1], dict) else 0):
+        if not isinstance(v, dict):
+            continue
+        try:
+            age = now - int(v.get("at") or 0)
+        except (TypeError, ValueError):
+            age = PENDING_JOIN_TTL + 1
+        if age >= PENDING_JOIN_TTL:
+            continue
+        token, _, acc = k.partition("@")
+        rows.append({"key": k, "kind": v.get("kind") or "request",
+                     "title": v.get("title") or "", "link": v.get("link") or "",
+                     "token": token, "acc": acc, "age_min": max(0, age // 60)})
+    return rows
+
+
+def _find_account(tag):
+    """按标识找回账号元组 (acc_no, client, phone)：支持 phone / uid / 序号。"""
+    from config import ACTIVE_ACCOUNTS
+    t = str(tag or "").strip()
+    for acc_no, client, phone in list(ACTIVE_ACCOUNTS or []):
+        cands = {str(acc_no), str(phone or ""),
+                 str(getattr(client, "phone", "") or ""),
+                 str(getattr(getattr(client, "me", None), "id", "") or "")}
+        if t and t in cands:
+            return (acc_no, client, phone)
+    return None
+
+
+def _verify_arm(client, link, title="", acc=None):
+    """撞入群验证时开「人在环」中继窗口：把该号收到的验证题**原样**转给老板，
+    等老板点/答。本函数不答题、不发消息，只是把耳朵暂借给中继模块。"""
+    try:
+        import verify_relay
+        verify_relay.arm(client, _acc_tag(client, acc), link, title or "")
+    except Exception as e:
+        log.info(f"[加群] 开验证中继失败(忽略): {type(e).__name__}: {e}")
+
+
+def verify_arm_by_tag(tag):
+    """「继续盯验证消息」按钮用：按在途记账里的 link/title 重新开窗。"""
+    rows = pending_joins_list()
+    hit = next((r for r in rows if r.get("acc") == str(tag) and r.get("kind") == "verify"), None)
+    acc_row = _find_account(tag)
+    if acc_row is None:
+        return f"❌ 账号 {tag} 当前不在线（未登录或已掉线），没法盯。"
+    _acc_no, client, _phone = acc_row
+    link = (hit or {}).get("link") or ""
+    title = (hit or {}).get("title") or ""
+    _verify_arm(client, link, title, acc=str(tag))
+    return (f"📡 已开始盯账号 {tag} 的验证消息（盯 30 分钟）。\n"
+            + (f"目标群：「{title}」" if title else "")
+            + "\n题目一出现就转到这个会话，你点哪个我只提交哪个。")
+
+
+async def join_group_one_account(link, acc_tag=None):
+    """用**指定那一个**账号重跑一次加群（老板说「我验证过了」时用）。
+    找不到该账号就退回全池逐号试。返回 (文本, 实体或None, 使用的账号标识)，
+    与 join_group_all_accounts 同构，调用方可以共用后续入表/拉名单逻辑。"""
+    from config import ACTIVE_ACCOUNTS
+    accounts = list(ACTIVE_ACCOUNTS or [])
+    if not accounts:
+        return ("❌ 没有可用账号", None, None)
+    row = _find_account(acc_tag)
+    if row is None:
+        log.info(f"[加群] 指定账号 {acc_tag!r} 不在线，退回全池重试")
+        return await join_group_all_accounts(accounts, link)
+    acc_no, client, phone = row
+    tag = getattr(client, "phone", None) or phone or f"账号{acc_no}"
+    try:
+        txt, ent = await join_group_by_link(client, link, acc=tag)
+    except Exception as e:
+        log.warning(f"[加群] 单账号重试异常 {type(e).__name__}: {e}", exc_info=True)
+        return (f"❌ 重试失败：{type(e).__name__}: {str(e)[:80]}", None, client)
+    return (f"{txt}\n📝 使用账号：{tag}", ent, client)
+
+
 def pending_joins_report() -> str:
     """列出所有在途申请（供「加群」复查用）。"""
     data = _pending_load()
@@ -734,8 +817,11 @@ async def join_group_by_link(client, link, acc=None):
                 except (TypeError, ValueError):
                     pass
                 if pend.get("kind") == "verify" or gate == "verify":
-                    return (f"🔒 「{t or '该群'}」开了入群验证，需要你本人在手机/电脑官方客户端用这个号点一次验证（答题/按钮）。\n"
-                            f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
+                    _verify_arm(client, link, t, acc=acc)
+                    return (f"🔒 「{t or '该群'}」开了入群验证，需要你本人过一道（抢题/按钮）。\n"
+                            f"   我不会代你抢——这是 Telegram 专门拦自动加群的门槛。\n"
+                            f"   📡 已改为「你在 Bot 里选、系统只提交」：验证机器人的原话和按钮\n"
+                            f"      会自动转到本会话，你点哪个我只提交哪个；或去官方客户端自己点。\n"
                             f"   验证过了再发一次同一链接，就会自动入表+拉名单。", None)
                 return (f"⏳ 「{t or '该群'}」的入群申请已在途{mins}，未重复提交。\n"
                         f"   等群主/管理员在「群设置 → 管理员 → 入群申请」里批准后，再发一次同一链接即可入表+拉名单。", None)
@@ -796,15 +882,20 @@ async def join_group_by_link(client, link, acc=None):
             # C：开了入群验证（机器人/答题）——只识别+挂起，不尝试代过
             if getattr(entity, "bot_verification_icon", None):
                 _pending_remember(link, client, title0, kind="verify", acc=acc)
-                log.info(f"[加群] 「{title0}」需人工验证，已挂起")
-                return (f"🔒 「{title0}」开了入群验证，需要你本人在手机/电脑官方客户端用这个号点一次验证（答题/按钮）。\n"
-                        f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
-                        f"   验证过了再发一次同一链接，就会自动入表+拉名单。", None)
+                _verify_arm(client, link, title0, acc=acc)
+                log.info(f"[加群] 「{title0}」需人工验证，已挂起+开中继盯题")
+                return (f"🔒 「{title0}」开了入群验证，需要你本人过一道（抢题/按钮）。\n"
+                        f"   我不会代你抢——这是 Telegram 专门拦自动加群的门槛。\n"
+                        f"   📡 已开「盯验证消息」：验证机器人发的原话和按钮会自动转到本会话，\n"
+                        f"      你点哪个我只提交哪个（一次只提交一次，不重复、不自作主张）。\n"
+                        f"   也可以在官方客户端自己点，过了再发同一链接就会自动入表+拉名单。", None)
             pend = _pending_get(link, client, acc)
             if pend:
                 # 已发过申请：不重复提交（重发=给群主刷屏+被判骚扰）
                 if pend.get("kind") == "verify":
-                    return (f"🔒 「{title0}」需人工验证，等你用这个号在官方客户端点过一次后再发同一链接。", None)
+                    _verify_arm(client, link, title0, acc=acc)
+                    return (f"🔒 「{title0}」需人工验证，已继续盯着该号的验证消息。\n"
+                            f"   题目一到就转过来，你选完提交；过了之后发同一链接即自动入表+拉名单。", None)
                 try:
                     mins = f"（已等 {max(0, int(time.time()) - int(pend.get('at') or 0)) // 60} 分钟）"
                 except (TypeError, ValueError):
@@ -841,11 +932,13 @@ async def join_group_by_link(client, link, acc=None):
         if _err_gate(e) == "verify":
             try:
                 _pending_remember(link, client, "", kind="verify", acc=acc)
+                _verify_arm(client, link, "", acc=acc)
             except Exception:
                 pass
-            log.info(f"[加群] 碰人工验证类错误 {type(e).__name__}，已挂起不硬撞")
-            return (f"🔒 这个群要人工验证（{type(e).__name__}），需要你本人在手机/电脑官方客户端用这个号过一道。\n"
-                    f"   我不会代你过这道验证——这是 Telegram 专门拦自动加群的门槛。\n"
+            log.info(f"[加群] 碰人工验证类错误 {type(e).__name__}，已挂起+开中继盯题")
+            return (f"🔒 这个群要人工验证（{type(e).__name__}），需要你本人过一道。\n"
+                    f"   我不会代你抢——这是 Telegram 专门拦自动加群的门槛。\n"
+                    f"   📡 已开「盯验证消息」：题目一到就转到本会话，你点哪个我只提交哪个。\n"
                     f"   过了再发一次同一链接，就会自动入表+拉名单。", None)
         log.warning(f"[加群] ❌ 异常 {type(e).__name__}: {e} (输入={raw!r})", exc_info=True)
         return (f"❌ 加入失败: {type(e).__name__}: {e}", None)

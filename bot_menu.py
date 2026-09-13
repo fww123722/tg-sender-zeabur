@@ -453,6 +453,59 @@ def pool_menu_text(count=0, random_on=False):
     )
 
 
+def verify_relay_kb(iid, it=None):
+    """验证题中继面板：把验证 bot 原话里的按钮**原样**列回去。
+
+    一个按钮对应一次人工点击，编号 = 展示时的序号（回调 vr:<iid>:c:<序号>）。
+    系统不自选、不猜题：老板不点，这里一个字节都不会发出去。"""
+    rows = []
+    opts = (it or {}).get("opts") or []
+    cur = []
+    for n, o in enumerate(opts, 1):
+        label = f"{n}. {(o.get('text') or '')[:16]}"
+        cur.append(Button.inline(label, f"vr:{iid}:c:{n}".encode()))
+        if len(cur) == 2:
+            rows.append(cur)
+            cur = []
+    if cur:
+        rows.append(cur)
+    link = ((it or {}).get("link") or "").strip()
+    if link:
+        url = link if link.startswith("http") else "https://" + link.lstrip("/")
+        if url.startswith("http"):
+            rows.append([Button.url("🔗 打开群", url=url)])
+    rows.append([Button.inline("✖ 忽略此题", f"vr:{iid}:x".encode())])
+    return rows
+
+
+def pending_joins_inline_kb(rows):
+    """在途申请列表（内联）：每行一个，点开看详情+可执行动作。
+    rows: [{'kind','title','token','acc','link','age_min'}...]，按传入顺序编号。"""
+    out = []
+    cur = []
+    for idx, r in enumerate(rows, 1):
+        icon = "🔒" if r.get("kind") == "verify" else "⏳"
+        title = (r.get("title") or r.get("token") or "?")[:16]
+        cur.append(Button.inline(f"{icon} {idx}·{title}", f"vj:{idx}".encode()))
+        if len(cur) == 2:
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    out.append([Button.inline(BTN["back"], b"vj:back")])
+    return out
+
+
+def pending_join_detail_kb(idx, kind="verify"):
+    """单条在途申请的动作面板。🔒 多一个「继续盯验证消息」。"""
+    rows = []
+    if kind == "verify":
+        rows.append([Button.inline("📡 继续盯验证消息", f"vja:{idx}".encode())])
+    rows.append([Button.inline("✅ 我过了，重试", f"vjr:{idx}".encode())])
+    rows.append([Button.inline(BTN["back"], b"vj:back")])
+    return rows
+
+
 def report_menu_text():
     return (
         "🚨 举报中心\n\n"

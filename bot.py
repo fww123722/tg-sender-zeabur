@@ -33,6 +33,7 @@ from collector import (
     join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
     pending_joins_report,
     db_add_pool_text, db_list_pool, db_del_pool, db_clear_pool, db_pool_texts,
+    pending_joins_list, verify_arm_by_tag, join_group_one_account,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
 from profile import edit_all_profiles
@@ -51,7 +52,9 @@ from bot_menu import (
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
     pool_menu_kb, pool_menu_text, pool_inline_kb,
+    pending_joins_inline_kb, pending_join_detail_kb,
 )
+import verify_relay
 from reasons import REPORT_REASONS, REASON_CN
 from reporter import (
     report_user, report_custom, report_super, cooldown_summary,
@@ -259,6 +262,7 @@ async def _push_main_menu(event):
 # =====================================================================
 def register_handlers(bot, accounts):
     # accounts 引用 ACTIVE_ACCOUNTS 模块级容器
+    verify_relay.set_bot(bot)   # 验证题中继：撞到入群验证时把题目转给老板
 
     def _no_accounts(event) -> bool:
         if not accounts:
@@ -628,7 +632,17 @@ def register_handlers(bot, accounts):
                 return
             await _reply(event, await list_my_groups(accounts[0][1]), buttons=_groups_kb(event))
         elif action == "pending_joins":
-            await _reply(event, pending_joins_report(), buttons=_groups_kb(event))
+            rows = pending_joins_list()
+            extra = verify_relay.armed_summary()
+            head = pending_joins_report()
+            if extra:
+                head += "\n\n" + extra
+            if rows:
+                state.setdefault("pj_map_by", {})[str(cid)] = rows
+                await _reply(event, head + "\n\n👇 点一个看详情/直接操作：",
+                             buttons=pending_joins_inline_kb(rows))
+            else:
+                await _reply(event, head, buttons=_groups_kb(event))
         elif action == "del_group_menu":
             groups = db_get_all_groups()
             if not groups:
@@ -856,6 +870,12 @@ def register_handlers(bot, accounts):
         if config.LOGIN_STATE:
             return
 
+        # 4.5 验证题人工应答：ans <编号> <答案>
+        pa = verify_relay.parse_answer(text)
+        if pa and pa[0]:
+            await _reply(event, await verify_relay.submit_answer(pa[0], pa[1], event.sender_id))
+            return
+
         # 5. 未登录状态下多余输入提示
         if not accounts:
             await _reply(event, "尚未登录账号，请点「账号管理」→「添加账号」。", buttons=_main_kb(event))
@@ -867,6 +887,24 @@ def register_handlers(bot, accounts):
         m = re.search(r"(?:https?://)?t\.me/(?:joinchat/|\+)?[A-Za-z0-9_\-]+", text)
         if m and not state["busy"] and accounts:
             await _auto_addgroup(event, accounts, m.group(0))
+
+    @bot.on(events.NewMessage(pattern="^/verify$"))
+    async def on_verify(event):
+        """看当前验证题中继状态（不答题，只报现在盯谁、有什么题待你选）。"""
+        if not is_authorized(event.sender_id):
+            return
+        items = verify_relay.open_items()
+        lines = [f"📡 验证题中继：当前 {len(items)} 道题等你处理"]
+        for iid, it in items:
+            lines.append(f"  · {iid}  账号{it['acc']}  「{it['title'] or '?'}」  "
+                         f"{len(it['opts'])} 个按钮  {max(0, (time.time() - it['at']) // 60):.0f} 分钟前")
+        summ = verify_relay.armed_summary()
+        if summ:
+            lines.append("")
+            lines.append(summ)
+        lines.append("")
+        lines.append("🔒 系统不自选按钮、不自算答案：每一次提交都得你在消息上点/打字。")
+        await _reply(event, "\n".join(lines))
 
     # ---------- 内联键盘回调（消息附带按钮：系统设置 / 选群） ----------
     @bot.on(events.CallbackQuery)
@@ -887,6 +925,12 @@ def register_handlers(bot, accounts):
                 await _cb_grouppick(event, data[3:])
             elif data.startswith("pl:"):
                 await _cb_pool(event, data[3:])
+            elif data.startswith("vr:"):
+                await _cb_verify(event, data[3:])
+            elif data.startswith("vja:") or data.startswith("vjr:"):
+                await _cb_pendingjoin_act(event, data)
+            elif data.startswith("vj:"):
+                await _cb_pendingjoin(event, data[3:])
             else:
                 await event.answer()
         except Exception as e:
@@ -1011,6 +1055,134 @@ def register_handlers(bot, accounts):
         except ValueError:
             return
         await _campaign_group_chosen(event, accounts, n)
+
+    # ---------- 入群验证「人在环」中继（系统只搬题，答题的是人） ----------
+    async def _cb_verify(event, rest):
+        """vr:<iid>:c:<序号> 提交老板选的那个按钮 / vr:<iid>:x 忽略本题。"""
+        parts = rest.split(":")
+        if len(parts) < 2:
+            await event.answer("⚠️ 按钮参数不对", alert=True)
+            return
+        iid, op = parts[0], parts[1]
+        if op == "x":
+            await event.answer("已忽略")
+            await _reply(event, verify_relay.drop(iid, event.sender_id))
+            return
+        if op != "c" or len(parts) < 3:
+            await event.answer()
+            return
+        res = await verify_relay.click_option(iid, parts[2], event.sender_id)
+        try:
+            await event.answer("已提交" if res.startswith("✅") else "未提交")
+        except Exception:
+            pass
+        await _reply(event, res)
+
+    def _pj_detail(r):
+        kind = r.get("kind")
+        icon = "🔒" if kind == "verify" else "⏳"
+        head = (f"{icon} 「{r.get('title') or r.get('token') or '?'}」\n"
+                f"账号：{r.get('acc') or '?'}   已等：{r.get('age_min', 0)} 分钟\n"
+                f"链接：{r.get('link') or '(无)'}\n\n")
+        if kind == "verify":
+            body = ("这个群开了入群验证。系统不代答，只帮你搬题：\n"
+                    "· 📡 继续盯验证消息 —— 验证 bot 的原话/按钮自动转到这个会话，你选哪个我只提交哪个\n"
+                    "· ✅ 我过了，重试 —— 已经自己点过了？用同一账号重跑一次加群\n")
+        else:
+            body = ("已向群主提交入群申请，等他在「入群申请」里批准。\n"
+                    "批准后点「✅ 我过了，重试」（或直接发同一链接）就会自动入表。\n")
+        return head + body + "⚠️ 不自动答题、不重复提交申请，这两条是写死的。"
+
+    async def _cb_pendingjoin(event, arg):
+        """vj:<序号> 看详情 / vj:back 返回。"""
+        if arg == "back":
+            await event.answer()
+            await _reply(event, pending_joins_report(), buttons=_groups_kb(event))
+            return
+        rows = ((state.get("pj_map_by") or {}).get(str(event.sender_id))
+                or pending_joins_list())
+        try:
+            idx = int(arg)
+        except ValueError:
+            await event.answer("⚠️ 序号无效", alert=True)
+            return
+        if idx < 1 or idx > len(rows):
+            await event.answer("列表已刷新，请重新点「📨 在途申请」", alert=True)
+            return
+        r = rows[idx - 1]
+        state.setdefault("pj_map_by", {})[str(event.sender_id)] = rows
+        await event.answer()
+        await _reply(event, _pj_detail(r),
+                     buttons=pending_join_detail_kb(idx, r.get("kind") or "request"))
+
+    async def _cb_pendingjoin_act(event, data):
+        """vja:<序号> 继续盯验证消息 / vjr:<序号> 我已验证，重试。"""
+        kind, sidx = data[:3], data[3:]
+        try:
+            idx = int(sidx)
+        except ValueError:
+            await event.answer("⚠️ 序号无效", alert=True)
+            return
+        rows = ((state.get("pj_map_by") or {}).get(str(event.sender_id))
+                or pending_joins_list())
+        if idx < 1 or idx > len(rows):
+            await event.answer("列表已刷新，请重新点「📨 在途申请」", alert=True)
+            return
+        r = rows[idx - 1]
+        state.setdefault("pj_map_by", {})[str(event.sender_id)] = rows
+        if kind == "vja":
+            if not r.get("link"):
+                await event.answer("这条没存链接，无法盯", alert=True)
+                return
+            await event.answer("已开启盯题")
+            await _reply(event, verify_relay_arm_safe(r.get("acc"), r.get("link"),
+                                                      r.get("title") or ""))
+            return
+        if not r.get("link"):
+            await event.answer("这条没存链接，无法重试", alert=True)
+            return
+        await event.answer("正在重试…")
+        await _pj_retry(event, r)
+
+    async def _pj_retry(event, r):
+        """用原账号 + 原链接再走一次加群；过了就顺手拉名单。"""
+        if state["busy"]:
+            await _reply(event, _busy_tip(event))
+            return
+        _set_busy(event.sender_id)
+        try:
+            txt, ent, used = await join_group_one_account(r.get("link"), r.get("acc"))
+        finally:
+            _clear_busy()
+        await _reply(event, txt)
+        tag = getattr(used, "phone", None) or r.get("acc")
+        if str(txt).startswith("✅"):
+            if tag:
+                verify_relay.forget_arm(tag)
+            if ent is not None:
+                await _reply(event, "📊 正在拉取群成员到名单…")
+                await _reply(event, await collect_members(used, ent),
+                             buttons=_groups_kb(event))
+            else:
+                await _reply(event, "✅ 已在群里。要拉名单去「🚀 群发运营」选群。",
+                             buttons=_groups_kb(event))
+        else:
+            await _reply(event, "ℹ️ 还没通过。要我把验证题搬过来，点「📨 在途申请」→ 选中该群 → 「📡 继续盯验证消息」。",
+                         buttons=_groups_kb(event))
+
+    def verify_relay_arm_safe(acc_tag, link, title):
+        # 保留链接/标题入参版：重新开窗（内部会按 tag 找回 client）
+        try:
+            import collector as _C
+            row = _C._find_account(acc_tag)
+            if row is None:
+                return f"❌ 账号 {acc_tag} 当前不在线（未登录或已掉线），没法盯。"
+            _C._verify_arm(row[1], link, title, acc=str(acc_tag))
+            return (f"📡 已开始盯账号 {acc_tag} 的验证消息（盯 30 分钟）。\n"
+                    + (f"目标群：「{title}」\n" if title else "")
+                    + "题目一到就转到这个会话，你点哪个我只提交哪个。")
+        except Exception as e:
+            return f"❌ 开盯失败：{type(e).__name__}: {str(e)[:60]}"
 
     def _menu_kb_for_action(action):
         if action in ("camp_step3",):  # 文案输入时保留群发菜单
@@ -1505,7 +1677,9 @@ def register_handlers(bot, accounts):
                 elif r.startswith("🔒"):
                     await _reply(event,
                         "🔒 这类群开了人工验证，只能你本人在官方客户端用该号点一次。\n"
-                        "    已记入「在途申请」，验证后发回同一链接即可。", buttons=_groups_kb(event))
+                        "    已记入「在途申请」，验证后发回同一链接即可。\n\n"
+                        "📡 或者：去「📨 在途申请」点这个群 →「📡 继续盯验证消息」，\n"
+                        "    验证 bot 的原话和按钮会搬到这个会话，你点哪个我只提交哪个。", buttons=_groups_kb(event))
                 return
             await _reply(event, "正在读取群成员到名单…")
             # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
