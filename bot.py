@@ -1200,9 +1200,11 @@ def register_handlers(bot, accounts):
         finally:
             _clear_busy()
         remain = db_get_all_groups()
+        # 注：f-string 的 {} 里不能放带反斜杠的转义（线上 python 3.11 会 SyntaxError），先算变量
+        tail = "✅ Bot 记录已删除" if deleted else "ℹ️ Bot 记录本就不存在"
         msg = (f"🗑 删除「{title}」(id={gid}) 完成：\n"
                + "\n".join(lines)
-               + f"\n{'\u2705 Bot 记录已删除' if deleted else '\u2139\ufe0f Bot 记录本就不存在'}"
+               + f"\n{tail}"
                + f"\n剩余 {len(remain)} 个群。")
         if not remain:
             msg += "\n表已清空，返回群管理。"
