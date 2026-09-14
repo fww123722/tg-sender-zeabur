@@ -540,13 +540,11 @@ def main_menu_text(accounts, groups_count, unsent_count, pool_count, busy: bool,
     else:
         tag = ("操作员：" + name) if name else "操作员"
     lock = f"｜占用：{busy_tip}" if busy and busy_tip else ""
-    return (
-        f"\U0001f4cb 控制面板\uff5c{tag}\n"
-        f"{'\u23f3 任务中' if busy else '\U0001f7e2 空闲'}{lock}"
-        f"\uff5c\U0001f464{len(accounts)} \U0001f4c1{groups_count} "
-        f"\U0001f4e8未发{unsent_count} \U0001f4dd池{pool_count}"
-        + ("" if role == "owner" else "\n\u2139\ufe0f 增删操作员需找admin。")
-    )
+    run_state = "⏳ 任务中" if busy else "🟢 空闲"     # 3.11: 反斜杠不能进 f-string 表达式
+    op_note = "\nℹ️ 增删操作员需找admin。" if role != "owner" else ""
+    return (f"📋 控制面板｜{tag}\n"
+            f"{run_state}{lock}｜👤{len(accounts)} 📁{groups_count} "
+            f"📨未发{unsent_count} 📝池{pool_count}" + op_note)
 
 
 def campaign_menu_text():
