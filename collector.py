@@ -123,11 +123,46 @@ async def _members_meta(client, entity):
         return 0, None, None, None
 
 
-def _target_from_user(user, my_id, recent_only_days, skipped):
+def _join_since(user):
+    """从成员对象上拿「他什么时候进的这个群」。
+
+    telethon 的 iter_participants 会把 participant 附到 user 上，
+    ChannelParticipant.date 就是入群时间（拉到的顺序、筛 3 天新人全靠它）。
+    采发言人那条路拿不到（消息里的 sender 不带 participant），只能退回发言时间。
+    """
+    p = getattr(user, "participant", None)
+    d = getattr(p, "date", None) or getattr(p, "joined_date", None)
+    if d is None:
+        return None
+    try:
+        from datetime import timezone
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _joined_within(user, days):
+    """入群时间在 days 天内（拿不到入群时间 -> 不算新人，保守排除）。"""
+    d = _join_since(user)
+    if d is None:
+        return False
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    try:
+        return (now - d).total_seconds() <= days * 86400
+    except Exception:
+        return False
+
+
+def _target_from_user(user, my_id, recent_only_days, skipped, join_days=0):
     """按「能不能群发」的标准清洗一个成员/发言人。
 
-    返回 (uid, username, access_hash) 或 None（None = 该过滤掉，已计入 skipped）。
+    返回 (uid, username, access_hash, via, source_group, member_since) 或 None
+    （None = 该过滤掉，已计入 skipped）。
     拉名单与采发言人共用这一套，避免两条路出来的名单干净程度不一致。
+
+    join_days：只留最近 N 天进群的（老板：进群后只关心新面孔）。
+    拿不到入群时间的（比如采发言人那条路）不当新人，走原有全量逻辑。
     """
     if user.bot:
         skipped["bot"] += 1
@@ -141,15 +176,24 @@ def _target_from_user(user, my_id, recent_only_days, skipped):
     if my_id is not None and user.id == my_id:
         skipped["self"] += 1
         return None
-    # 开关：只保留近期活跃成员
+    # 开关：只保留近期活跃成员（按上次上线时间）
     if recent_only_days and not _is_recently_active(user, recent_only_days):
         skipped["inactive"] += 1
         return None
-    return (str(user.id), user.username, getattr(user, "access_hash", 0) or 0)
+    since = _join_since(user)
+    if join_days and not _joined_within(user, join_days):
+        skipped["old_member"] += 1
+        return None
+    return (str(user.id), user.username, getattr(user, "access_hash", 0) or 0,
+            "", 0, since)
 
 
-async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
-    """从群/频道拉取成员并加入名单。"""
+async def collect_members(client, peer_arg, limit=5000, recent_only_days=0,
+                          join_days=0, via="members"):
+    """从群/频道拉取成员并加入名单。
+
+    join_days>0：只要最近 N 天进群的人（老板要的就是一进新群只吃新面孔）。
+    """
     try:
         entity = await _resolve_entity(client, peer_arg)
     except Exception as e:
@@ -176,19 +220,25 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
     batch = []
     added = 0
     seen = 0          # Telegram 实际下发了多少条（含被排除的），用来识破「只给管理员」
+    gid = int(getattr(entity, "id", 0) or 0)
     # 这个群到底多少人、本账号有没有权限看全（拿不到就是 0/None）
     real_total, can_view, hidden, admins_n = await _members_meta(client, entity)
-    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0}
+    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0,
+               "old_member": 0}
+    no_join_date = 0
     try:
         async for user in client.iter_participants(entity, limit=limit):
             # 排除：非用户对象 / 机器人 / 已注销(删除) / 无用户名 / 账号自己
             seen += 1
             if not isinstance(user, User):
                 continue
-            item = _target_from_user(user, my_id, recent_only_days, skipped)
+            if join_days and _join_since(user) is None:
+                no_join_date += 1
+            item = _target_from_user(user, my_id, recent_only_days, skipped,
+                                     join_days=join_days)
             if item is None:
                 continue
-            batch.append(item)
+            batch.append(item[:3] + (via or "members", gid, item[5]))
             added += 1
             if len(batch) >= 500:
                 db_add_targets(batch)
@@ -213,8 +263,13 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
             parts.append(f"账号自己 {skipped['self']}")
         if skipped["inactive"]:
             parts.append(f"久未上线 {skipped['inactive']}")
+        if skipped.get("old_member"):
+            parts.append(f"老成员 {skipped['old_member']}")
         skip_msg = f"，已排除（{('、'.join(parts))}）"
     recent_note = f"（仅保留近{recent_only_days}天活跃）" if recent_only_days else ""
+    join_note = (f"（只要近{join_days}天进群的新人）" if join_days else "")
+    if join_days and no_join_date:
+        join_note += f"，{no_join_date} 人拿不到入群时间没当新人算"
     # 读到的数远少于服务端统计的真实人数：肯定有东西把名单拦住了一半以上。
     # 拦住的原因有两种，文案分开说，别一律推给「只显示管理员」：
     #   A) 只读到个位数且不超管理员数 -> 群主把成员页设成只显示管理员（老板碰到的就是这个）
@@ -254,10 +309,11 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
         f"（本群 {real_total} 人，受单次上限 {limit} 人限制）"
         if real_total and limit and real_total > limit else "")
     return (f"✅ 从「{name}」拉取完成：新增有效成员 {added} 人"
-            f"{skip_msg}{recent_note}{cap_note}，名单共 {total} 人")
+            f"{skip_msg}{join_note}{recent_note}{cap_note}，名单共 {total} 人")
 
 
-async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0):
+async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0,
+                           via="speakers", min_date=None):
     """从群/频道「历史消息」里采发过言的人入名单（成员页被锁时的备用通道）。
 
     为什么走得通：成员名单是服务端就没往下发（换号也没用），但「这条消息是谁发的」
@@ -265,6 +321,7 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
     只追加入名单，绝不清空（不拆别人正在跑的名单）。
 
     msg_limit：翻多少条历史。越大采越全，也越容易撞限流。
+    min_date：只收这个时间之后的消息（「只读 3 天内」这条要求就落在这儿）。
     返回文案统一用 ✅/❌ 开头，与 collect_members 一致，调用方据此判断。
     """
     try:
@@ -279,19 +336,30 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
         my_id = None
 
     name = getattr(entity, "title", str(peer_arg))
+    gid = int(getattr(entity, "id", 0) or 0)
     counts = {}   # uid -> 发言条数（越活跃越该先进名单）
     objs = {}     # uid -> User 对象（可能是 min、缺 username）
+    seen_time = {}  # uid -> 首次发言时间（当「他什么时候冒出来」的近似）
     msgs_read = 0
+    too_old = 0     # 比 min_date 更早、已经不看的条数
     anon = 0      # 拿不到作者的条数（匿名发言/系统消息）
     flood = 0
     try:
         async for msg in client.iter_messages(entity, limit=msg_limit):
+            if min_date is not None:
+                md = getattr(msg, "date", None)
+                if md is not None and md < min_date:
+                    # 历史是从新往老翻的，一旦翻过窗口边界，后面只会更老 -> 直接收工
+                    too_old += 1
+                    break
             msgs_read += 1
             sid = getattr(msg, "sender_id", None)
             if not sid:
                 anon += 1
                 continue
             counts[sid] = counts.get(sid, 0) + 1
+            if sid not in seen_time:
+                seen_time[sid] = getattr(msg, "date", None)
             s = getattr(msg, "sender", None)
             if isinstance(s, User) and sid not in objs:
                 objs[sid] = s
@@ -326,7 +394,8 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
     real_total, _cv, _hd, _ad = await _members_meta(client, entity)
     batch = []
     added = 0
-    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0}
+    skipped = {"bot": 0, "deleted": 0, "no_username": 0, "self": 0, "inactive": 0,
+               "old_member": 0}
     for sid in sorted(counts, key=lambda k: -counts[k]):
         u = objs.get(sid)
         if not isinstance(u, User):
@@ -336,7 +405,9 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
         item = _target_from_user(u, my_id, recent_only_days, skipped)
         if item is None:
             continue
-        batch.append(item)
+        # 发言人这条路拿不到 participant，入群时间用「第一次发言时间」近似
+        batch.append((item[0], item[1], item[2], via or "speakers", gid,
+                      item[5] or seen_time.get(sid)))
         added += 1
         if len(batch) >= 500:
             db_add_targets(batch)
@@ -359,12 +430,15 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
     skip_msg = f"，已排除（{'、'.join(parts)}）" if any(skipped.values()) else ""
     recent_note = f"（仅保留近{recent_only_days}天活跃）" if recent_only_days else ""
     cap_note = f"（本群真实 {real_total} 人）" if real_total else ""
+    win_note = f"（只看 {min_date:%m-%d} 之后的消息）" if min_date else ""
     head = (f"✅ 从「{name}」历史采完：翻了 {msgs_read} 条消息，"
-            f"{len(counts)} 个不同发言人，入名单 {added} 人{skip_msg}{recent_note}"
+            f"{len(counts)} 个不同发言人，入名单 {added} 人{skip_msg}{recent_note}{win_note}"
             f"{cap_note}，名单共 {total} 人")
     tails = []
     if flood:
         tails.append(f"   ⏳ 中途撞到频率限制（需等 {flood}s），已把读到的部分入库，没浪费。")
+    if too_old:
+        tails.append(f"   ⏱ 翻到窗口边界就停了（更早的 {too_old} 条不再看）。")
     if anon:
         tails.append(f"   ℹ️ 有 {anon} 条拿不到作者（匿名发言/系统消息），已跳过。")
     if tried_upgrade:
@@ -375,21 +449,29 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
 
 
 async def collect_members_or_speakers(client, peer_arg, limit=5000,
-                                      recent_only_days=0, msg_limit=2000):
+                                      recent_only_days=0, msg_limit=2000,
+                                      join_days=0):
     """先按成员列表拉；被服务端挡住时**自动**接力采发言人，不用人再点一次。
 
     老板原话：「不用点击采发言人，就自动读取」。
     成员列表权限是服务端锁死的，换号也变不出来；但「谁发过言」是公开的，
     所以拿不全名单时直接转这条通道，而不是只弹一句提示让人自己琢磨。
+    join_days>0：只要最近 N 天进群的人（新群只吃新面孔）。
     返回拼接后的文本，开头仍保留 ✅/⚠️/❌ 供调用方判断。
     """
+    from datetime import datetime, timedelta, timezone
     r = await collect_members(client, peer_arg, limit=limit,
-                              recent_only_days=recent_only_days)
+                              recent_only_days=recent_only_days,
+                              join_days=join_days)
     if not r.startswith("⚠️"):
         return r
     before = db_count_targets()
+    # 只要新人时，翻历史也别翻到窗口外去：省请求、也少惹限流
+    min_date = (datetime.now(timezone.utc) - timedelta(days=join_days)
+                if join_days else None)
     r2 = await collect_speakers(client, peer_arg, msg_limit=msg_limit,
-                                recent_only_days=recent_only_days)
+                                recent_only_days=recent_only_days,
+                                min_date=min_date)
     got = db_count_targets() - before
     return (r + "\n\n"
             + f"🗣 名单拿不全就不卡在这：已**自动**改从历史消息采发言人"
@@ -638,6 +720,12 @@ async def _save_group_info(client, entity):
     except Exception:
         pass
     db_add_group(gid, title, username, member_count, creator_uid)
+    # 新群一入表就纳入自动补录（不等下一轮补扫）；失败不影响加群主流程
+    try:
+        from member_watch import warm_groups
+        warm_groups()
+    except Exception:
+        pass
     return title, member_count
 
 

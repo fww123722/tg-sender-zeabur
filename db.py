@@ -58,6 +58,36 @@ class DB:
         cur.execute("""
             ALTER TABLE targets ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0
         """)
+        # 名单来源追溯（老板要「进群后一直读取」）：每个人是从哪个群、经哪条通道
+        # 进来的、他什么时候进的那个群——不记下来就没法验证 3 天窗口有没有生效。
+        # 同时 created_at 就是老板要的「录入时间」：群发默认按它从新到旧排队。
+        cur.execute("""
+            ALTER TABLE targets ADD COLUMN IF NOT EXISTS via TEXT DEFAULT ''
+        """)
+        cur.execute("""
+            ALTER TABLE targets ADD COLUMN IF NOT EXISTS source_group BIGINT DEFAULT 0
+        """)
+        cur.execute("""
+            ALTER TABLE targets ADD COLUMN IF NOT EXISTS member_since TIMESTAMPTZ
+        """)
+        # 「未发送」看板要按来源群分组统计，没索引的话每次都得全表扫 sent_log
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_targets_source_group ON targets (source_group)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_targets_created_at ON targets (created_at DESC)
+        """)
+        # 每个群的监听进度：读到哪条消息了。容器重启后从这儿接着读，不从头再翻一遍。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS watch_cursor (
+                group_id BIGINT PRIMARY KEY,
+                title TEXT DEFAULT '',
+                last_msg_id BIGINT DEFAULT 0,
+                last_scan_at TIMESTAMPTZ,
+                new_since_last INT DEFAULT 0,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
         # 每个账号的发送记录：account_no + uid 组合唯一
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sent_log (
@@ -244,28 +274,126 @@ class DB:
 
 # ---- targets ----
 def db_load_targets():
-    """返回 {uid: {"username": ..., "access_hash": ...}}"""
+    """返回 {uid: {"username": ..., "access_hash": ...}}。
+
+    排序固定按录入时间从新到旧（created_at DESC）：老板「默认从所有群聊以从新
+    到旧录入的人开始群发」。sender 那边是 list(targets.keys()) 入队，字典顺序
+    就是发货顺序，所以这里排好就行，不须动发送逻辑。
+    同一个人重复录入（被多个群各自补录一次）只会刷新来源，created_at 保持第一次
+    入表的时间，不会被「挤」到新那一端。
+    """
     conn = DB.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT uid, username, access_hash FROM targets")
+            cur.execute(
+                "SELECT uid, username, access_hash FROM targets "
+                "ORDER BY created_at DESC, uid")
             return {row[0]: {"username": row[1], "access_hash": row[2] or 0} for row in cur.fetchall()}
     finally:
         DB.putconn(conn)
 
 
 def db_add_targets(items):
-    """items: list of (uid, username, access_hash)"""
+    """items: list of (uid, username, access_hash) 或
+    (uid, username, access_hash, via, source_group, member_since)。
+
+    老调用方传 3 元组照样能用；同一 uid 再来一次只更新来源信息，不产生重复。
+    """
+    rows = []
+    for it in items:
+        if len(it) >= 6:
+            uid, username, access_hash, via, sg, ms = it[0], it[1], it[2], it[3], it[4], it[5]
+        else:
+            uid, username, access_hash = it[0], it[1], it[2]
+            via, sg, ms = "", 0, None
+        rows.append((str(uid), username or "", access_hash or 0,
+                     via or "", int(sg or 0), ms))
     conn = DB.getconn()
     try:
         with conn.cursor() as cur:
             cur.executemany(
-                "INSERT INTO targets (uid, username, access_hash) VALUES (%s, %s, %s) "
+                "INSERT INTO targets (uid, username, access_hash, via, source_group, member_since) "
+                "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (uid) DO UPDATE SET "
-                "username = EXCLUDED.username, access_hash = EXCLUDED.access_hash",
-                items,
+                "username = EXCLUDED.username, access_hash = EXCLUDED.access_hash, "
+                "via = CASE WHEN EXCLUDED.via <> '' THEN EXCLUDED.via ELSE targets.via END, "
+                "source_group = CASE WHEN EXCLUDED.source_group <> 0 "
+                "                   THEN EXCLUDED.source_group ELSE targets.source_group END, "
+                "member_since = COALESCE(EXCLUDED.member_since, targets.member_since)",
+                rows,
             )
         conn.commit()
+    finally:
+        DB.putconn(conn)
+
+
+def db_watch_cursor(gid):
+    """取某个群读到哪条消息了；没有记录返回 0（第一次从头翻）。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_msg_id FROM watch_cursor WHERE group_id = %s", (int(gid),))
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+    finally:
+        DB.putconn(conn)
+
+
+def db_watch_set(gid, title, last_msg_id, new_since_last=None):
+    """推进监听游标。只在往前走了的时候才改，避免并发把水位线倒退。"""
+    try:
+        gid, last_msg_id = int(gid), int(last_msg_id or 0)
+    except (TypeError, ValueError):
+        return
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO watch_cursor (group_id, title, last_msg_id, last_scan_at, updated_at)
+                VALUES (%s, %s, %s, now(), now())
+                ON CONFLICT (group_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    last_msg_id = GREATEST(watch_cursor.last_msg_id, EXCLUDED.last_msg_id),
+                    last_scan_at = now(),
+                    updated_at = now()
+            """, (gid, (title or "")[:60], last_msg_id))
+            if new_since_last is not None:
+                cur.execute("UPDATE watch_cursor SET new_since_last = %s WHERE group_id = %s",
+                            (int(new_since_last), gid))
+        conn.commit()
+    finally:
+        DB.putconn(conn)
+
+
+def db_watch_list():
+    """所有群的监听进度（按最后扫描时间倒序）。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT group_id, title, last_msg_id, last_scan_at, new_since_last
+                FROM watch_cursor ORDER BY updated_at DESC
+            """)
+            return cur.fetchall()
+    except Exception as e:
+        log.warning(f"读监听进度失败: {e}")
+        return []
+    finally:
+        DB.putconn(conn)
+
+
+def db_targets_by_via():
+    """名单构成：各来源通道各多少人（members/speakers/watch/未知）。"""
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(NULLIF(via, ''), '未知'), COUNT(*) FROM targets GROUP BY 1
+            """)
+            return dict(cur.fetchall())
+    except Exception as e:
+        log.warning(f"名单构成统计失败: {e}")
+        return {}
     finally:
         DB.putconn(conn)
 
@@ -276,6 +404,58 @@ def db_count_targets():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM targets")
             return cur.fetchone()[0]
+    finally:
+        DB.putconn(conn)
+
+
+def db_unsent_stats():
+    """名单里还没发过的人：返回 (未发人数, 名单总数)。
+
+    「发过」按 sent_log 去重算（任何一个号发过就算），跟看板上那个「已发(去重)」同一口径；
+    开了「重复推广」也不影响这里的定义——名单里只要没进过 sent_log，就是没发过。
+    """
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM targets t "
+                "WHERE NOT EXISTS (SELECT 1 FROM sent_log s WHERE s.uid = t.uid)")
+            unsent = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM targets")
+            total = cur.fetchone()[0]
+            return unsent, total
+    finally:
+        DB.putconn(conn)
+
+
+def db_unsent_by_group(limit=10):
+    """未发送按来源群分组（从新到旧）：[(群名, 未发人数, 名单总数), ...]。
+
+    没来源群的（早期旧数据/手动导入）归到「未记录来源」，不丢人。
+    """
+    conn = DB.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(NULLIF(t.source_group, 0), 0) AS sg,
+                       COUNT(*) FILTER (WHERE NOT EXISTS
+                           (SELECT 1 FROM sent_log s WHERE s.uid = t.uid)) AS unsent,
+                       COUNT(*) AS total,
+                       MAX(t.created_at) AS newest
+                FROM targets t
+                GROUP BY 1
+                ORDER BY newest DESC
+                LIMIT %s
+            """, (int(limit),))
+            rows = cur.fetchall()
+            cur.execute("SELECT group_id, title, username FROM groups_info")
+            names = {int(r[0]): (r[1] or r[2] or str(r[0])) for r in cur.fetchall()}
+        out = []
+        for sg, unsent, total, _newest in rows:
+            label = names.get(int(sg)) if sg else None
+            out.append((label or ("未记录来源" if not sg else f"群 {sg}"),
+                        int(unsent), int(total)))
+        return out
     finally:
         DB.putconn(conn)
 

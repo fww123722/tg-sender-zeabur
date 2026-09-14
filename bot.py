@@ -4,7 +4,7 @@
 
 成体系交互：
 主菜单 → 群发运营 / 群管理 / 账号管理 / 数据看板 / 系统设置
-群发运营走 3 步（①选群自动拉成员 → ②写文案 → ③确认开跑）。
+群发运营走 2 步（①写文案 → ②确认开跑）：不选群，默认打所有群的人，按录入时间从新到旧。
 进度、选中的群、文案等持久化到 DB（ops_state），下次回来接着继续。
 """
 import asyncio
@@ -27,6 +27,7 @@ from db import (
     db_load_operators, db_add_operator, db_drop_operator,
     db_log_op, db_op_log_recent, db_op_log_since,
     db_campaign_start, db_campaign_finish, db_campaign_leaderboard,
+    db_unsent_stats, db_unsent_by_group,
 )
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
@@ -49,14 +50,16 @@ from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_inline_kb, dashboard_menu_kb, dashboard_inline_kb, report_menu_kb, reason_menu_kb,
-    group_pick_inline_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
-    group_repull_inline_kb,
+    group_del_kb, profile_menu_kb, group_del_confirm_kb,
+    group_repull_inline_kb, watch_menu_kb, settings_menu_kb,
+    watch_menu_text,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
     pool_menu_kb, pool_menu_text, pool_inline_kb,
     pending_joins_inline_kb, pending_join_detail_kb,
 )
 import verify_relay
+import member_watch
 from reasons import REPORT_REASONS, REASON_CN
 from reporter import (
     report_user, report_custom, report_super, cooldown_summary,
@@ -94,8 +97,18 @@ def _owner_only_hint(event) -> str:
 async def _reply(event, text, buttons=None):
     try:
         return await event.client.send_message(event.chat_id, text, buttons=buttons)
-    except Exception:
-        return None
+    except Exception as e:
+        # 键盘带 iOS 语义色时，万一服务端不认这个字段，退回纯文字键盘重发一次：
+        # 宁可丑一点，也不能因为美化把消息发不出去。
+        plain = getattr(buttons, "plain", None)
+        if plain is None:
+            log.warning(f"[ui] 发消息失败({type(e).__name__}): {str(e)[:120]}")
+            return None
+        log.warning(f"[ui] 带样式键盘发送失败({type(e).__name__})，降级纯文字键盘重试")
+        try:
+            return await event.client.send_message(event.chat_id, text, buttons=plain)
+        except Exception:
+            return None
 
 
 # 原地编辑节流：Telegram 对 editMessageText 有频控，连续编辑同一条太快会 FLOOD_WAIT。
@@ -138,7 +151,13 @@ async def _edit_or_send(msg, event, text, buttons=None):
                 # Telegram 频控：等一会接着改同一条，绝不因此发新消息
                 await asyncio.sleep(min(int(secs or 0) or 2, 6))
                 continue
-            log.warning(f"[ui] 原地编辑失败({type(e).__name__})，尝试兜底：{str(e)[:160]}")
+            plain = getattr(buttons, "plain", None)
+            if plain is not None:
+                # 先当是样式问题：换纯文字键盘接着改同一条（不新增消息）
+                log.warning(f"[ui] 带样式键盘编辑失败({type(e).__name__})，降级纯文字键盘重试")
+                buttons = plain
+                continue
+            log.warning(f"[ui] 原地编辑失败({type(e).__name__})，尝试兑底：{str(e)[:160]}")
             break
 
     # 兜底：换 client.edit_message 再试一次（msg.edit 在部分场景不可用）
@@ -220,6 +239,32 @@ def _clear_busy():
     state["busy_by"] = None
 
 
+def _camp_kb(uid=None):
+    """群发运营键盘：按「现在真能按什么」出键。
+
+    已不再选群（老板：群发默认打所有群的人，从新到旧），所以只剩两步：
+    没文案 → 绿在「写文案」；有文案（或开了随机轮换且池里有条）→ 绿在「确认开跑」。
+    排版固定不变，避免刷新时按钮跳位。
+    """
+    c = {}
+    try:
+        c = get_campaign(uid) or {}
+    except Exception:
+        c = {}
+    running = bool(state.get("busy"))
+    paused = bool(state.get("paused")) and running
+    has_text = bool(c.get("text"))
+    if not has_text:
+        # 开了随机轮换且池里已有文案 = 不用手写也算就绪
+        try:
+            has_text = bool(state.get("pool_random")) and db_count_pool() > 0
+        except Exception:
+            pass
+    kb = campaign_menu_kb(stage=(1 if has_text else 0), running=running, paused=paused)
+    # 发送失败时 _reply 会取 .plain 降级；这里把同样的降级键盘也同步好
+    return kb
+
+
 def _busy_tip(event) -> str:
     """生成「正忙」提示；别人占着时点名，自己占着时说清楚。"""
     b = state.get("busy_by") or {}
@@ -234,14 +279,50 @@ def _busy_tip(event) -> str:
 
 
 def _settings_kb():
-    """系统设置内联键盘（附在消息上，按钮显示当前值）。"""
-    return settings_inline_kb(
+    """系统设置键盘（底部，按钮文字上带当前值）。
+
+    只留这一套：以前消息上还附一排内联开关，同一个设置两个地方各一个，
+    看着就乱——现在内联面板只给老消息用（点了仍生效），新消息全走底部。
+    """
+    return settings_menu_kb(
         recent_on=bool(state.get("recent_only_days")),
         repeat_on=bool(state.get("allow_repeat")),
-        parse_label=PARSE_LABEL.get(state.get("parse_mode"), "纯文本"),
         speed=state.get("min_delay"),
         quota=state.get("daily_limit"),
     )
+
+
+def _watch_kb():
+    """成员补录子菜单键盘（常驻自动，没有开关）。"""
+    return watch_menu_kb()
+
+
+def _settings_text() -> str:
+    """设置页文本：永远拿当前值念，不写死。"""
+    return settings_menu_text(state.get("recent_only_days"),
+                              state.get("allow_repeat"))
+
+
+def _pull_filters():
+    """拉名单用的两个过滤参数。
+
+    recent_only_days：用户可设（只拉近 7 天上过线的人）；
+    join_days：固定 3 天，不给设置（老板：「补录是完全自动操作的，不用设置」）。
+    要改就改 member_watch.py 里的 JOIN_WINDOW_DAYS（或环境变量）重部。
+    """
+    _apply_settings_to_state()
+    return (int(state.get("recent_only_days") or 0), member_watch.window_days())
+
+
+async def _watch_now(event):
+    """立即把所有在盯的群补扫一轮（后台跑，不堵事件循环）。"""
+    if state["busy"]:
+        await _reply(event, _busy_tip(event), buttons=_watch_kb())
+        return
+    _audit(event, "watch_now", "手动补扫")
+    await _reply(event, "⚡ 正在逐群补扫（只读窗口内的新消息，不会重翻历史）…",
+                 buttons=_watch_kb())
+    asyncio.ensure_future(member_watch.sweep_once(reason="手动"))
 
 
 async def _push_main_menu(event):
@@ -560,7 +641,7 @@ def register_handlers(bot, accounts):
         if name == "accounts":
             return lambda e: show(e, accounts_menu_text(), accounts_menu_kb)
         if name == "settings":
-            return lambda e: show(e, settings_menu_text(), _settings_kb)
+            return lambda e: show(e, _settings_text(), _settings_kb)
         return lambda e: _push_main_menu(e)
 
     MENU_SHOW = {
@@ -583,7 +664,7 @@ def register_handlers(bot, accounts):
     def _menu_text(event, action):
         if action == "menu_settings":
             _apply_settings_to_state()
-            return settings_menu_text(state.get("recent_only_days"), state.get("allow_repeat"))
+            return _settings_text()
         if action == "menu_pool":
             return pool_menu_text(db_count_pool(), bool(state.get("pool_random")))
         base = MENU_SHOW[action]()
@@ -649,7 +730,7 @@ def register_handlers(bot, accounts):
             groups = db_get_all_groups()
             if not groups:
                 await _reply(event,
-                    "ℹ️ 表里还没有已加入的群。先「加群」或到「🚀 群发运营」选群。",
+                    "ℹ️ 表里还没有已加入的群。先到「📥 群管理 → ➕ 加群」。",
                     buttons=_groups_kb(event))
                 return
             await _reply(event,
@@ -728,9 +809,7 @@ def register_handlers(bot, accounts):
             await _reply(event, _groups_text(event), buttons=_groups_kb(event))
         elif action == "back_settings":
             _apply_settings_to_state()
-            await _reply(event, settings_menu_text(state.get("recent_only_days"),
-                                                   state.get("allow_repeat")),
-                         buttons=_settings_kb())
+            await _reply(event, _settings_text(), buttons=_settings_kb())
         elif action == "pool_random":
             s = _load_settings()
             new = not s.get("pool_random", False)
@@ -754,11 +833,9 @@ def register_handlers(bot, accounts):
             # 在跑：给实时进度（与聊天里那条同文本）；没在跑：不编造进度、不贴草稿清单
             live = state.get("live") or {}
             if state["busy"] and live.get("text"):
-                await _reply(event, live["text"], buttons=campaign_menu_kb())
+                await _reply(event, live["text"], buttons=_camp_kb(event.sender_id))
             else:
-                await _reply(event, "ℹ️ 当前没有在跑的任务。", buttons=campaign_menu_kb())
-        elif action == "camp_step1":
-            await _campaign_pick_group(event, accounts)
+                await _reply(event, "ℹ️ 当前没有在跑的任务。", buttons=_camp_kb(event.sender_id))
         elif action == "camp_start":
             await _do_start(event, accounts)
         elif action == "pause" or action == "resume":
@@ -771,11 +848,11 @@ def register_handlers(bot, accounts):
                 state["paused"] = True
                 _audit(event, "pause", "暂停了 " + who + " 的任务")
                 await _reply(event, "⏸ 已暂停（点「继续」恢复）",
-                             buttons=campaign_menu_kb())
+                             buttons=_camp_kb(event.sender_id))
             else:
                 state["paused"] = False
                 _audit(event, "resume", "继续了 " + who + " 的任务")
-                await _reply(event, "▶️ 已继续", buttons=campaign_menu_kb())
+                await _reply(event, "▶️ 已继续", buttons=_camp_kb(event.sender_id))
         elif action == "stop":
             b = state.get("busy_by") or {}
             who = b.get("name") or "当前任务"
@@ -784,7 +861,7 @@ def register_handlers(bot, accounts):
             _clear_busy()
             release_list(b.get("uid"))
             _audit(event, "stop", "停掉了 " + who + " 的任务")
-            await _reply(event, "🛑 已停止当前任务", buttons=campaign_menu_kb())
+            await _reply(event, "🛑 已停止当前任务", buttons=_camp_kb(event.sender_id))
         elif action == "set_recent_filter":
             _apply_settings_to_state()
             s = _load_settings()
@@ -810,6 +887,12 @@ def register_handlers(bot, accounts):
                  "❌ 「重复推广」已关：每人只推一次，发过的自动跳过。")
                 + f"\n\n{settings_menu_text(s.get('recent_only_days'), new)}",
                 buttons=_settings_kb())
+        # ---- 成员自动补录（常驻自动，只能手动提早一批）----
+        elif action == "watch_status":
+            await _reply(event, watch_menu_text() + "\n" + member_watch.status_text(),
+                         buttons=_watch_kb())
+        elif action == "watch_now":
+            await _watch_now(event)
         elif action == "back_home":
             await _push_main_menu(event)
         # ---- 举报中心 ----
@@ -834,6 +917,9 @@ def register_handlers(bot, accounts):
         # 1. 底部按钮 → 执行动作
         if text in BTN_ACTION:
             action = BTN_ACTION[text]
+            if action == "noop":
+                # 「✖ 取消」这类只出现在内联列表上，底部键盘按到它什么都不该干
+                return
             if action in OWNER_EXCLUSIVE and not is_owner(event.sender_id):
                 await _reply(event, _owner_only_hint(event))
                 return
@@ -847,14 +933,7 @@ def register_handlers(bot, accounts):
                          buttons=report_menu_kb())
             return
 
-        # 1.2 已保存群选群按钮 → 确认拉取
-        m_pick = re.match(r"^📤 (\d+)·", text)
-        if m_pick:
-            pick_no = int(m_pick.group(1))
-            await _campaign_group_chosen(event, accounts, pick_no)
-            return
-
-        # 1.3 删除群按钮 → 二次确认（退群+删记录）
+        # 1.2 删除群按钮 → 二次确认（退群+删记录）
         m_del = re.match(r"^🗑 (\d+)·", text)
         if m_del:
             g = ((state.get("del_group_map_by") or {}).get(
@@ -872,7 +951,7 @@ def register_handlers(bot, accounts):
                 buttons=group_del_confirm_kb())
             return
 
-        # 2. 数字快捷选群（从「我的群」返回的群序号，预留）
+        # 2. 数字快捷选群已废除（群发不再选群）
         # 3. 有 pending 输入 → 消费
         action = pending_action.get(event.sender_id)
         if action:
@@ -920,7 +999,7 @@ def register_handlers(bot, accounts):
         lines.append("🔒 系统不自选按钮、不自算答案：每一次提交都得你在消息上点/打字。")
         await _reply(event, "\n".join(lines))
 
-    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 选群） ----------
+    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 重拉选群） ----------
     @bot.on(events.CallbackQuery)
     async def on_callback(event):
         if not is_authorized(event.sender_id):
@@ -936,7 +1015,10 @@ def register_handlers(bot, accounts):
             elif data.startswith("db:"):
                 await _cb_dashboard(event, data[3:])
             elif data.startswith("gp:"):
-                await _cb_grouppick(event, data[3:])
+                # 已废弃：群发不再选群（旧消息上可能还挂着这个按钮）
+                await event.answer("不用选群了：直接发文案再点「确认开跑」，"
+                                   "默认打所有群的人（从新到旧）", alert=True)
+                return
             elif data.startswith("gr:"):
                 await _cb_regroup(event, data[3:])
             elif data.startswith("pl:"):
@@ -957,7 +1039,12 @@ def register_handlers(bot, accounts):
                 pass
 
     async def _cb_settings(event, rest):
-        """设置内联按钮：st:recent / st:repeat / st:parse / st:speed:+5 / st:quota:-10 / st:home"""
+        """设置内联按钮（旧消息上的面板）：st:recent / st:repeat / st:join / st:parse /
+        st:speed:+5 / st:quota:-10 / st:home
+
+        新版底部键盘已经接管了这些开关；内联面板只保住兼容：以前发出去的
+        设置消息还能点，但改完后同时把底部键盘刷成新状态。
+        """
         if rest == "home":
             await event.answer()
             await _push_main_menu(event)
@@ -968,6 +1055,11 @@ def register_handlers(bot, accounts):
             new = 0 if s.get("recent_only_days") else 7
             s["recent_only_days"] = new
             tip = "已开启：只拉近7天活跃成员" if new else "已关闭：拉全部有效成员"
+        elif rest == "join":
+            # 旧设置消息上还挂着这个键：不再可改，只告知它是自动的、固定 3 天
+            await event.answer(f"补录全自动，固定近 {member_watch.window_days()} 天，不用设置",
+                               alert=True)
+            return
         elif rest == "repeat":
             new = not s.get("allow_repeat", False)
             s["allow_repeat"] = new
@@ -1001,9 +1093,7 @@ def register_handlers(bot, accounts):
             return
         ops_set("settings", s)
         _apply_settings_to_state()
-        await event.edit(settings_menu_text(state.get("recent_only_days"),
-                                            state.get("allow_repeat")),
-                         buttons=_settings_kb())
+        await event.edit(_settings_text(), buttons=_settings_kb())
         await event.answer(tip)
 
     def _pool_list_text():
@@ -1058,20 +1148,6 @@ def register_handlers(bot, accounts):
             return
         await event.answer()
 
-    async def _cb_grouppick(event, arg):
-        """选群内联按钮：gp:<序号> / gp:back"""
-        if arg == "back":
-            await event.answer()
-            await _reply(event, campaign_menu_text() + "\n\n" + campaign_text(event.sender_id),
-                         buttons=campaign_menu_kb())
-            return
-        await event.answer("正在拉取成员…")
-        try:
-            n = int(arg)
-        except ValueError:
-            return
-        await _campaign_group_chosen(event, accounts, n)
-
     async def _cb_regroup(event, arg):
         """「🔄 重拉成员」内联按钮：gr:<序号> / gr:back"""
         if arg == "back":
@@ -1088,7 +1164,7 @@ def register_handlers(bot, accounts):
     async def _regroup_pull(event, pick_no):
         """已加入的群重新拉成员：不清空只追加，撞锁自动改采发言人。
 
-        和「① 选群」的区别：选群是开新任务（先清空名单），重拉是补充现有名单。
+        和群发的区别：群发已不再选群（直接打全库名单），重拉只是往名单里补人。
         两边走同一把名单锁，避免把陌生人混进别人正在跑的那一轮。
         """
         if _no_accounts(event):
@@ -1127,8 +1203,9 @@ def register_handlers(bot, accounts):
             for acc_no, client, _ph in accounts:
                 tried += 1
                 b0 = db_count_targets()
+                rd, jd = _pull_filters()
                 rr = await collect_members_or_speakers(
-                    client, target, recent_only_days=state.get("recent_only_days", 0))
+                    client, target, recent_only_days=rd, join_days=jd)
                 got = db_count_targets() - b0
                 if r is None or got > best:
                     r, best = rr, got
@@ -1257,7 +1334,7 @@ def register_handlers(bot, accounts):
                              buttons=_groups_kb(event))
             else:
                 await _reply(event, "✅ 已在群里。要拉名单去「📥 群管理 → 🔄 重拉成员」，"
-                                    "或「🚀 群发运营 → ① 选群」。",
+                                    "或直接等自动补录。",
                              buttons=_groups_kb(event))
         else:
             await _reply(event, "ℹ️ 还没通过。要我把验证题搬过来，点「📨 在途申请」→ 选中该群 → 「📡 继续盯验证消息」。",
@@ -1318,7 +1395,7 @@ def register_handlers(bot, accounts):
             if not ready:
                 await _reply(event,
                     "❌ 没有可用账号，无法群发。请先去「👥 账号管理」处理。",
-                    buttons=campaign_menu_kb())
+                    buttons=_camp_kb(event.sender_id))
                 return
             # HTML 自动检测（仅当文本模式为自动/纯文本时）
             pm = state.get("parse_mode")
@@ -1330,8 +1407,8 @@ def register_handlers(bot, accounts):
             body = (campaign_menu_text() + "\n\n✅ 文案已保存：\n"
                     + text[:100] + ("…" if len(text) > 100 else "")
                     + note + "\n\n" + campaign_text(event.sender_id)
-                    + f"\n\n✅ {len(ready)} 个账号就绪，名单 {db_count_targets()} 人。\n点「③ ✅ 确认开跑」开始群发。")
-            await _reply(event, body, buttons=campaign_menu_kb())
+                    + f"\n\n✅ {len(ready)} 个账号就绪，名单 {db_count_targets()} 人。\n点「③ 确认开跑」开始群发。")
+            await _reply(event, body, buttons=_camp_kb(event.sender_id))
         elif action == "pool_add_prompt":
             db_add_pool_text(text)
             _audit(event, "pool_add", f"{len(text)} 字")
@@ -1356,9 +1433,10 @@ def register_handlers(bot, accounts):
                 s["min_delay"], s["max_delay"] = sec, sec + 10
                 ops_set("settings", s)
                 state["min_delay"], state["max_delay"] = sec, sec + 10
-                await _reply(event, f"⚡ 间隔已设为 {sec}-{sec+10}s", buttons=_settings_kb())
+                await _reply(event, f"⚡ 间隔已设为 {sec}-{sec+10}s\n\n{_settings_text()}",
+                             buttons=_settings_kb())
             except ValueError:
-                await _reply(event, "❌ 请输入数字秒数", buttons=_settings_kb())
+                await _reply(event, "❌ 请输入数字秒数（如 5）", buttons=_settings_kb())
         elif action == "set_quota_prompt":
             try:
                 q = max(1, int(text))
@@ -1366,9 +1444,10 @@ def register_handlers(bot, accounts):
                 s["daily_limit"] = q
                 ops_set("settings", s)
                 state["daily_limit"] = q
-                await _reply(event, f"🎯 每账号每日上限已设为 {q} 条", buttons=_settings_kb())
+                await _reply(event, f"🎯 每账号每日上限已设为 {q} 条\n\n{_settings_text()}",
+                             buttons=_settings_kb())
             except ValueError:
-                await _reply(event, "❌ 请输入数字条数", buttons=_settings_kb())
+                await _reply(event, "❌ 请输入数字条数（如 200）", buttons=_settings_kb())
         elif action == "set_parallel_prompt":
             await _reply(event, "⏩ 并行账号数由系统按可用账号自动分配，无需手动设置。\n"
                                 "当前可用账号越多，自动分配越快。", buttons=_settings_kb())
@@ -1395,7 +1474,8 @@ def register_handlers(bot, accounts):
                 buttons=_settings_kb())
 
     # ---------- 数据看板 ----------
-    DASH_MODE = {}  # {chat_id: bool} False=每人统计 True=账号明细
+    # 看板三视图：False=每人统计 / "unsent"=未发送明细 / True=账号明细
+    DASH_MODE = {}
 
     async def _dashboard(event, show_accounts=False, edit=False):
         # OWNER_ID 对外统一显示 admin；DB 历史行可能存旧称谓，按 uid 强制归一
@@ -1404,15 +1484,34 @@ def register_handlers(bot, accounts):
                 return "admin"
             return r_name or actor_name(uid)
         sent = db_sent_global()
+        # 未发送：名单里还没进过 sent_log 的人（老板点名要看这个数）
+        try:
+            unsent, total = db_unsent_stats()
+        except Exception:
+            unsent, total = max(0, db_count_targets() - sent), db_count_targets()
         lines = [
             "📊 数据看板",
+            f"• 名单总数: {total} 人",
             f"• 已发(去重): {sent} 人",
+            f"• ❗ 未发送: {unsent} 人" + (f"（占名单 {unsent * 100 // total}%）" if total else ""),
             f"• 文案池: {db_count_pool()} 条",
             f"• 已加群: {db_group_count()} 个",
             f"• 在线账号: {len(accounts)} 个",
             "—",
         ]
-        if show_accounts:
+        if show_accounts == "unsent":
+            lines.append("未发送按来源群（名单从新到旧就按这个顺序发）：")
+            try:
+                grows = db_unsent_by_group(12)
+            except Exception:
+                grows = []
+            if grows:
+                for label, u, t in grows:
+                    lines.append(f"  • {label[:20]}: 未发 {u} / 共 {t}")
+            else:
+                lines.append("  （名单是空的，先去「📥 群管理」加群拉人）")
+            lines.append("—")
+        if show_accounts is True:
             lines.append("各账号明细（今日/累计）：")
             for acc_no, client, _ph in accounts:
                 s = db_load_stats(acc_no)
@@ -1440,7 +1539,7 @@ def register_handlers(bot, accounts):
             await _reply(event, text, buttons=kb)
 
     async def _cb_dashboard(event, rest):
-        """看板内联按钮：db:acc 账号明细 / db:who 每人统计 / db:ref 刷新 / db:home 返回"""
+        """看板内联按钮：db:acc 账号明细 / db:who 每人统计 / db:un 未发送 / db:ref 刷新 / db:home 返回"""
         chat = event.chat_id
         mode = DASH_MODE.get(chat, False)
         if rest == "home":
@@ -1451,6 +1550,8 @@ def register_handlers(bot, accounts):
             mode = True
         elif rest == "who":
             mode = False
+        elif rest == "un":
+            mode = "unsent"
         elif rest == "ref":
             pass  # 保持当前模式重新渲染
         DASH_MODE[chat] = mode
@@ -1480,98 +1581,6 @@ def register_handlers(bot, accounts):
         lines.append("如需改昵称/头像/简介，点「批量改资料」养号。")
         await _reply(event, "\n".join(lines), buttons=accounts_menu_kb())
 
-    # ---------- 群发运营（新版：选群→文案→自动检查→确认开跑） ----------
-    async def _campaign_pick_group(event, accounts):
-        """① 选群入口：列出已保存的群（groups_info）供按钮选择，无需手动输入。"""
-        if _no_accounts(event):
-            return
-        groups = db_get_all_groups()
-        if not groups:
-            await _reply(event,
-                "❌ 还没有已保存的群。\n"
-                "先去「📥 群管理」加群（加群会自动保存群信息），再回来选群。",
-                buttons=campaign_menu_kb())
-            return
-        if len(groups) > 30:
-            groups = groups[:30]
-        # 序号→群 映射存 state，点击后回查
-        group_map = {str(i): g for i, g in enumerate(groups, 1)}
-        state.setdefault("group_pick_map_by", {})[str(event.sender_id)] = group_map
-        await _reply(event,
-            f"📤 请选择要拉取的群（共 {len(groups)} 个，点下方按钮）：",
-            buttons=group_pick_inline_kb(groups))
-
-    async def _campaign_group_chosen(event, accounts, pick_no):
-        """选完群：记录运营群 → 清空旧名单 → 自动拉成员 → 提示写文案。"""
-        group_map = (state.get("group_pick_map_by") or {}).get(str(event.sender_id)) or {}
-        g = group_map.get(str(pick_no))
-        if not g:
-            await _reply(event, "⚠️ 该序号无效，请重新点「① 选群」。", buttons=campaign_menu_kb())
-            return
-        gid, title, username, _mc, _creator = g
-        target = username or str(gid)
-        if state["busy"]:
-            await _reply(event, _busy_tip(event))
-            return
-        uid = event.sender_id
-        ok, holder = claim_list(uid, actor_name(uid), title or target)
-        if not ok:
-            await _reply(event,
-                f"⛔ 名单正被 {holder.get('name') or '其他人'} 占用"
-                f"（{holder.get('group') or '未选群'}）。\n"
-                "名单全库只有一份，重新选群会清掉对方的名单，所以只能排队。\n"
-                "等对方跑完，或 30 分钟后自动解锁；紧急情况找admin点「🛑 停止任务」。",
-                buttons=campaign_menu_kb())
-            return
-        _set_busy(uid)
-        try:
-            cleared = db_clear_targets()
-            await _reply(event,
-                f"✅ 已选群「{title or target}」\n"
-                f"🧹 已清空旧名单（{cleared} 人）\n"
-                f"🔄 正在拉取成员到名单…")
-            r = None
-            tried = 0
-            best = -1
-            # ❌ = 这个账号不在群里/找不到群 → 换下一个；
-            # ⚠️ = 名单被服务端挡住（成员页只显示管理员 / 超大群列不全）——
-            #      旧逻辑碰到 ⚠️ 也直接 break，后面的账号根本没试过，
-            #      而后面某个账号很可能在这个群里是管理员，能拿全。
-            # ✅ = 拿全了，立刻收工。
-            for acc_no, client, _ph in accounts:
-                tried += 1
-                before = db_count_targets()
-                rr = await collect_members_or_speakers(client, target,
-                                          recent_only_days=state.get("recent_only_days", 0))
-                got = db_count_targets() - before   # 不拆文案里的数字，直接看库里进了多少
-                if r is None or got > best:
-                    r, best = rr, got
-                if rr.startswith("✅"):
-                    break
-            if r is None:
-                r = "❌ 没有可用账号，无法拉取"
-            elif r.startswith("⚠️") and tried > 1:
-                r += (f"\n   ↪ 已换过 {tried} 个账号，都没能看全；"
-                      f"名单最终累计 {db_count_targets()} 人。")
-            await _reply(event, r)
-            if r.startswith("❌"):
-                release_list(uid)
-                return  # 拉取失败，不进入文案环节
-            set_campaign(uid, group=target, group_title=title or target,
-                         target_count=db_count_targets())
-            _audit(event, "pick_group",
-                   f"{title or target} → {db_count_targets()} 人")
-            await _reply(event,
-                "📝 群已选好，现在直接发送文案（支持 HTML：如 <b>加粗</b> <a href=\"https://t.me\">链接</a>）。\n"
-                "发完会自动检查账号，然后提示确认开跑。",
-                buttons=campaign_menu_kb())
-            # 进入文案输入等待
-            pending_action[uid] = "camp_step3"
-        except Exception as e:
-            await _reply(event, f"❌ 拉取成员失败：{e}", buttons=campaign_menu_kb())
-        finally:
-            _clear_busy()
-
     async def _check_accounts_ready(event, accounts):
         """自动检查账号状态：逐个检测连接+可用性，返回就绪账号列表（并实时报告）。"""
         ready = []
@@ -1593,29 +1602,28 @@ def register_handlers(bot, accounts):
         return ready
 
     async def _do_start(event, accounts):
-        """③ 确认开跑：必须群+名单+文案齐全才放行。"""
+        """确认开跑：不选群（老板要求），目标 = 全库名单按录入时间从新到旧。"""
         if _no_accounts(event):
             return
         if state["busy"]:
             await _reply(event, _busy_tip(event))
             return
         camp = get_campaign(event.sender_id)
-        if not camp.get("group"):
-            await _reply(event, "❌ 还没选群。请先点「① 选群」。", buttons=campaign_menu_kb())
-            return
         # 开了随机轮换 → 用文案池，不要求手写文案
         pool = db_pool_texts() if state.get("pool_random") else []
         if state.get("pool_random") and not pool:
             await _reply(event, "❌ 文案池是空的。先去「📚 文案池」加几条，或关掉随机轮换。",
-                         buttons=campaign_menu_kb())
+                         buttons=_camp_kb(event.sender_id))
             return
         text = camp.get("text") or (pool[0] if pool else "")
         if not text:
-            await _reply(event, "❌ 还没写文案。点「② 写文案」发一条，或开「🔀 随机轮换」用文案池。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 还没写文案。点「① 写文案」发一条，或开「🔀 随机轮换」用文案池。", buttons=_camp_kb(event.sender_id))
             return
         targets = db_load_targets()
         if not targets:
-            await _reply(event, "❌ 名单为空（可能该群没有可拉的有效成员）。请重新点「① 选群」拉一次。", buttons=campaign_menu_kb())
+            await _reply(event,
+                "❌ 名单是空的。先到「📥 群管理 → ➕ 加群」把群加进来，"
+                "人会自动补录进名单。", buttons=_camp_kb(event.sender_id))
             return
         _start_send_campaign(event, accounts, text, pool or None)
 
@@ -1795,7 +1803,9 @@ def register_handlers(bot, accounts):
             await _reply(event, "正在读取群成员到名单…")
             # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
             target = ent if ent is not None else text
-            r2 = await collect_members_or_speakers(used or accounts[0][1], target)
+            rd, jd = _pull_filters()
+            r2 = await collect_members_or_speakers(used or accounts[0][1], target,
+                                     recent_only_days=rd, join_days=jd)
             await _reply(event, r2, buttons=_groups_kb(event))
         finally:
             _clear_busy()
@@ -1807,7 +1817,7 @@ def register_handlers(bot, accounts):
         """
         parts = (text or "").split()
         if not parts:
-            await _reply(event, "❌ 没收到群链接。", buttons=campaign_menu_kb())
+            await _reply(event, "❌ 没收到群链接。", buttons=_camp_kb(event.sender_id))
             return
         peer = parts[0]
         try:
@@ -1827,7 +1837,7 @@ def register_handlers(bot, accounts):
                 f"🔒 名单正被 {holder.get('name') or '其他人'} 占用"
                 f"（{holder.get('group') or '-'}）。\n"
                 "采发言人会把人追加到同一份名单里，会混进对方的目标，所以只能排队。",
-                buttons=campaign_menu_kb())
+                buttons=_camp_kb(event.sender_id))
             return
         _audit(event, "collect_speakers", f"{peer} {n}条")
         await _reply(event,
@@ -1844,7 +1854,7 @@ def register_handlers(bot, accounts):
                     break   # 这个账号能看到历史，千完
             if r is None:
                 r = "❌ 没有可用账号，无法采集"
-            await _reply(event, r, buttons=campaign_menu_kb())
+            await _reply(event, r, buttons=_camp_kb(event.sender_id))
             if r.startswith("❌"):
                 release_list(uid)
         finally:
@@ -1877,8 +1887,9 @@ def register_handlers(bot, accounts):
                     await _reply(event, f"[{i}/{len(links)}] {link}\n{r1}\n⏭ 未进群，跳过拉名单")
                     continue
                 try:
+                    rd, jd = _pull_filters()
                     r2 = await collect_members_or_speakers(used or accounts[0][1], ent if ent is not None else link,
-                                           recent_only_days=state.get("recent_only_days", 0))
+                                           recent_only_days=rd, join_days=jd)
                 except Exception:
                     r2 = "拉人失败"
                 await _reply(event, f"[{i}/{len(links)}] {link}\n{r1}\n{r2}")
@@ -1896,7 +1907,7 @@ def register_handlers(bot, accounts):
             await _reply(event,
                 f"⛔ 名单正被 {holder.get('name') or '其他人'} 占用"
                 f"（{holder.get('group') or '-'}），重新拉人会清掉对方的名单。\n"
-                "请等对方跑完，或到「群发运营 → ① 选群」里排队。")
+                "请等对方跑完，或到「📥 群管理 → 🔄 重拉成员」里排队。")
             return
         _audit(event, "auto_addgroup", link[:80])
         await _reply(event, "检测到群链接，正在加入并读取成员…")
@@ -1915,8 +1926,9 @@ def register_handlers(bot, accounts):
                         "🔒 需你本人在官方客户端过一次验证，之后发回同一链接即可。",
                         buttons=_main_kb(event))
                 return
+            rd, jd = _pull_filters()
             r2 = await collect_members_or_speakers(used or accounts[0][1], ent if ent is not None else link,
-                                     recent_only_days=state.get("recent_only_days", 0))
+                                     recent_only_days=rd, join_days=jd)
             await _reply(event, r2, buttons=_main_kb(event))
         finally:
             _clear_busy()

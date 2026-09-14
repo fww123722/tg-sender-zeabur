@@ -15,6 +15,7 @@ from db import DB, db_load_operators
 from health import start_health_server
 from accounts import _find_session, _register_zip_receiver
 from bot import register_handlers
+import member_watch
 
 
 async def load_accounts(bot, notify=None, quiet_ok=True):
@@ -117,7 +118,6 @@ async def main():
 
     # 先注册指令 handler（含 /start /menu /login 等），让 owner 随时可操作 Bot
     register_handlers(bot, ACTIVE_ACCOUNTS)
-
     ready, failed = await load_accounts(bot)
     ACTIVE_ACCOUNTS.extend(ready)
 
@@ -161,6 +161,13 @@ async def main():
         f"🟢 群发系统已上线，{len(ready)} 个账号可用。\n"
         "点 /menu 打开控制面板。",
     )
+
+    # 进群后自动补录：挂监听（谁在群里发言/新人进群就收进名单）+ 起定时补扫
+    try:
+        _acc, _grp = member_watch.start(ready, bot=bot, owner=OWNER_ID)
+        log.info(f"📡 自动补录已启动：{_acc} 个账号挂监听，{_grp} 个群在盯")
+    except Exception as e:
+        log.error(f"📡 自动补录启动失败（不影响群发主流程）: {type(e).__name__}: {e}")
 
     # ---- 运行时热替换：监听新 zip 到达，断开旧客户端、重新加载 ----
     async def hot_reload_watcher():
@@ -211,6 +218,11 @@ async def main():
                 msg = f"♻️ 热替换完成，当前 {len(new_accounts)} 个账号在线"
                 for acc_no, client, phone in new_accounts:
                     asyncio.create_task(client.run_until_disconnected())
+                # 老 client 已经断开，监听要重新挂到新一批上（否则补录默默停摆）
+                try:
+                    member_watch.restart(new_accounts, bot=bot, owner=OWNER_ID)
+                except Exception as e:
+                    log.error(f"📡 热替换后重挂监听失败: {type(e).__name__}: {e}")
                 log.info(msg)
                 try:
                     await bot.send_message(get_notify(), msg)

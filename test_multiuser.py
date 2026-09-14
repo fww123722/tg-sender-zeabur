@@ -292,15 +292,10 @@ def section_c():
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_confirm"]))
     check("C stranger cannot delete group", DELETED == [])
 
-    # 选群/删群映射必须按人分键，否则两个人同时点选群会互相覆盖列表
-    run_handler("on_any_text", FakeEvent(ALICE, BTN["camp_step1"]))
-    run_handler("on_any_text", FakeEvent(BOB, BTN["camp_step1"]))
-    per_actor = bot.state.get("group_pick_map_by") or {}
-    check("C per-actor pick map populated",
-          str(ALICE) in per_actor and str(BOB) in per_actor
-          and per_actor[str(ALICE)] is not per_actor[str(BOB)])
-    check("C no legacy shared pick keys",
-          "group_pick_map" not in bot.state and "del_group_map" not in bot.state)
+    # 群发已不再选群：确认没有遗留的选群映射 state（旧逻辑两个人同时选群会互相覆盖列表）
+    check("C no legacy group_pick_map state",
+          "group_pick_map_by" not in bot.state and "group_pick_map" not in bot.state
+          and "del_group_map" not in bot.state)
 
 
 # =====================================================================

@@ -14,6 +14,20 @@ import config
 from config import ACCS, ACTIVE_ACCOUNTS, DATA_DIR, ZIP_RECEIVED, API_ID, API_HASH, OWNER_ID, is_authorized, log
 
 
+def _watch_attach(client):
+    """给刚登录的账号挂上「进群后自动补录」监听。
+
+    不这么做的话，新登的号要等下次重启/热替换才能开始盯群，
+    中间那段时间群里进了新人完全不知道。挂失败也不能影响登录流程。
+    """
+    try:
+        import member_watch
+        member_watch.track_client(client)
+        member_watch.attach(client)
+    except Exception as e:
+        log.info(f"[补录] 新账号挂监听失败(忽略): {type(e).__name__}: {str(e)[:80]}")
+
+
 def _login_target():
     """本次登录流程该跟谁对话（回落到主人）。"""
     ls = config.LOGIN_STATE or {}
@@ -148,6 +162,7 @@ async def _login_accounts(bot, accounts, targets, owner_entity, requester=None):
                 if not any(a[0] == acc_no for a in ACTIVE_ACCOUNTS):
                     ACTIVE_ACCOUNTS.append((acc_no, client, phone))
                     asyncio.create_task(client.run_until_disconnected())
+                    _watch_attach(client)   # 新号一上线就挂补录监听，不等重启
                 from db import DB
                 try:
                     DB.save_session("tg_session_%d" % acc_no, client.session.save())
@@ -210,6 +225,7 @@ async def _add_account_interactive(bot, phone, owner_entity, requester=None):
             ACCS[acc_no] = phone
             ACTIVE_ACCOUNTS.append((acc_no, client, phone))
             asyncio.create_task(client.run_until_disconnected())
+            _watch_attach(client)   # 同上：刚登录的账号也要能盯群
             try:
                 DB.save_session("tg_session_%d" % acc_no, client.session.save())
             except Exception as exc:
