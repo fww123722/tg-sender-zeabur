@@ -97,47 +97,59 @@ def main():
 
     # ---------- K4 全键盘零颜色（老板要求改回去）----------
     for name, kb in [("groups", M.groups_menu_kb()), ("report", M.report_menu_kb()),
-                     ("accounts", M.accounts_menu_kb()), ("settings", M.settings_menu_kb()),
-                     ("pool", M.pool_menu_kb())]:
+                     ("accounts", M.accounts_menu_kb())]:
         vals = styles(kb)
         ck("K4 %s 一个色都不带" % name, all(v is None for v in vals.values()), vals)
     ck("K4 总开关确实是关的", M.IOS_STYLE is False, M.IOS_STYLE)
 
-    # ---------- K5 降级键盘：每个键盘都带 .plain 且无颜色 ----------
+    def _icls(rows):
+        """内联键盘（[[Button,...],...]）-> {文字: 颜是否有色}。"""
+        out = {}
+        for row in rows:
+            for b in row:
+                s = getattr(b, "style", None)
+                out[b.text] = any(getattr(s, k, False) for k in
+                                  ("bg_success", "bg_danger", "bg_primary")) if s else False
+        return out
+
+    for name, rows in [("settings", M.settings_inline_kb(speed=5, quota=50)),
+                       ("pool", M.pool_menu_kb()),
+                       ("pool_del", M.pool_del_kb([("manual", 11, "AAA"),
+                                                   ("manual", 12, "BBB")]))]:
+        vals = _icls(rows)
+        ck("K4 %s(内联) 一个色都不带" % name, not any(vals.values()), vals)
+
+    # ---------- K5 降级键盘：底部键盘都带 .plain 且无颜色 ----------
     for name, kb in [("campaign", k0), ("groups", M.groups_menu_kb()),
-                     ("accounts", M.accounts_menu_kb()), ("report", M.report_menu_kb()),
-                     ("pool", M.pool_menu_kb()), ("settings", M.settings_menu_kb())]:
+                     ("accounts", M.accounts_menu_kb()), ("report", M.report_menu_kb())]:
         plain = getattr(kb, "plain", None)
         ck("K5 %s 带 .plain" % name, isinstance(plain, ReplyKeyboardMarkup), type(plain))
         ck("K5 %s .plain 文字相同且无色" % name,
            plain is not None and flat(plain) == flat(kb)
            and all(v is None for v in styles(plain).values()), flat(plain) if plain else None)
 
-    # ---------- K6 删除列表：文字格式必须和 bot.py 的正则对上（否则点了没反应）----------
+    # ---------- K6 删群（底部键盘）：文字格式必须和 bot.py 正则对上 ----------
     import re as _re
     groups = [(1, "锁名单群A", "ua", 5, 0), (2, None, None, 1, 0)]
     kd = M.group_del_kb(groups)
     ck("K6 删群项格式 = 🗑 N · 标题", flat(kd)[0].startswith("🗑 1 · "), flat(kd))
     ck("K6 删群标题去换行限长",
        "\n" not in flat(kd)[0] and len(flat(kd)[0]) < 40, flat(kd))
-    pd = M.pool_del_kb([("manual", 11, "AAA promo"), ("manual", 12, "BBB")])
-    ck("K6 删文案项格式 = 🗑 文案 N · 开头", flat(pd)[0].startswith("🗑 文案 1 · "), flat(pd))
     src_bot = io.open(os.path.join(HERE, "bot.py"), encoding="utf-8").read()
     g_re = _re.search(r'm_del = re\.match\(r"(.*?)",', src_bot)
-    p_re = _re.search(r'm_pool = re\.match\(r"(.*?)",', src_bot)
-    ck("K6 bot.py 两个删除正则都在", bool(g_re) and bool(p_re), (g_re, p_re))
-    if g_re and p_re:
+    ck("K6 bot.py 删群正则仍在", bool(g_re), g_re)
+    if g_re:
         ck("K6 删群正则匹配得上删群按钮",
            _re.match(g_re.group(1), flat(kd)[0]) is not None, (g_re.group(1), flat(kd)[0]))
-        ck("K6 删文案正则匹配得上删文案按钮",
-           _re.match(p_re.group(1), flat(pd)[0]) is not None, (p_re.group(1), flat(pd)[0]))
-        # 两条正则必须互斥，不然删文案会被当成删群（=退群事故）
-        ck("K6 删群正则不会误吃删文案按钮",
-           _re.match(g_re.group(1), flat(pd)[0]) is None, "撞车：会去退群!")
-        ck("K6 删文案正则不会误吃删群按钮",
-           _re.match(p_re.group(1), flat(kd)[0]) is None, "撞车")
+    # 删文案已改内联 callback：靠 msg_id 不靠文字，从根本上不可能误退群
+    pd = M.pool_del_kb([("manual", 11, "AAA promo"), ("manual", 12, "BBB")])
+    ck("K6 删文案按钮 callback 带真实 msg_id",
+       pd[0][0].data == b"pl:d:11" and pd[0][1].data == b"pl:d:12",
+       [b.data for r in pd for b in r])
+    ck("K6 删文案不再依赖文字正则",
+       'm_pool = re.match' not in src_bot, "bot.py 还在用文字匹配删文案")
 
-    # ---------- K7 内联键盘走原生 style 字符串（不是 TL 对象） ----------
+    # ---------- K7 其余内联键盘 ----------
     # 选群已废弃：group_pick_inline_kb 现在返回空（旧消息上的 gp: 按钮点了只回主菜单）
     gi = M.group_pick_inline_kb(groups)
     ck("K7 内联选群已废弃返回空", gi == [], gi)
@@ -145,16 +157,7 @@ def main():
     ck("K7 重拉 callback 仍是 gr:", gr[0][0].data == b"gr:1", gr[0][0].data)
     st = M.settings_inline_kb(recent_on=True, repeat_on=False, speed=5, quota=50)
     lab = {b.text: b for row in st for b in row}
-
-    def _color(b):
-        """telethon 默认就给一个空 style 对象，只看三个色标志是否全假。"""
-        s = getattr(b, "style", None)
-        return any(getattr(s, k, False) for k in ("bg_success", "bg_danger", "bg_primary"))
-
-    ck("K7 旧内联面板也不再上色",
-       not any(_color(b) for b in lab.values()),
-       {t: _color(b) for t, b in lab.items()})
-    ck("K7 旧内联面板不重复摆开关（只一套开关行）",
+    ck("K7 设置内联面板开关行只一套",
        sum(1 for t in lab if t.startswith("🔁")) == 1, list(lab))
 
     # ---------- K8 源码级：所有群发键盘都必须经过状态判断 ----------
@@ -169,27 +172,43 @@ def main():
     for s in stale:
         ck("K8 无旧按钮名残留：%s" % s, s not in src, "bot.py 还在写旧名")
 
-    # ---------- K9 文案池只剩三件事（老板 20:27）----------
-    fp_ = flat(M.pool_menu_kb())
+    # ---------- K9 文案池/设置都是「消息附带键盘」（老板 21:25）----------
+    pl = [b.text for row in M.pool_menu_kb() for b in row]
+    ck("K9 文案池菜单是内联键盘（list of rows）",
+       isinstance(M.pool_menu_kb(), list) and isinstance(M.pool_menu_kb()[0], list),
+       type(M.pool_menu_kb()))
     ck("K9 文案池键盘=新建/已有/删除+返回",
-       fp_ == [M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"],
-               M.BTN["back_settings"]], fp_)
+       pl == [M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"],
+              M.BTN["back_settings"]], pl)
     ck("K9 文案池键盘不再摆随机轮换/清空",
-       M.BTN["pool_random"] not in fp_ and M.BTN["pool_clear"] not in fp_, fp_)
+       M.BTN["pool_random"] not in pl and M.BTN["pool_clear"] not in pl, pl)
     ck("K9 三键名字就是老板说的那三个",
        (M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"])
        == ("➕ 新建文案", "📋 已有文案", "🗑 删除文案"),
        (M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"]))
-    ck("K9 文案池菜单动作已接 pool_del_menu",
-       M.BTN_ACTION[M.BTN["pool_del"]] == "pool_del_menu"
-       and '"pool_del_menu"' in src, M.BTN_ACTION[M.BTN["pool_del"]])
-    ck("K9 已有文案不再挂内联按钮", "pool_inline_kb(rows) if rows" not in src, "还在挂")
-    # 设置页：全部走消息键盘（底部），不靠内联开关
-    fs = flat(M.settings_menu_kb())
-    ck("K9 设置键盘是消息键盘且含四大项",
-       all(x in fs for x in (M.BTN["set_speed"], M.BTN["set_quota"],
-                             M.BTN["set_parsemode"], M.BTN["back"])), fs)
-    ck("K9 设置不超 4 行（老板：子菜单别超 3 行）", len(M.settings_menu_kb().rows) <= 4, fs)
+    ck("K9 文案池四件事都有 callback",
+       [b.data for row in M.pool_menu_kb() for b in row]
+       == [b"pl:new", b"pl:list", b"pl:del", b"pl:home"],
+       [b.data for row in M.pool_menu_kb() for b in row])
+    ck("K9 bot.py 接了 pl:new/pl:list/pl:del/pl:home",
+       all(('arg == "%s"' % a) in src_bot for a in ("new", "list", "del", "home")), "回调没接全")
+
+    # 设置：必须是消息附带（内联）键盘，不再发底部 ReplyKeyboard
+    ss = M.settings_inline_kb(recent_on=True, repeat_on=True, speed=7, quota=100,
+                              parse_label="HTML")
+    sl = {b.text: b.data.decode() for row in ss for b in row}
+    ck("K9 设置键盘是内联键盘", isinstance(ss, list) and isinstance(ss[0], list), type(ss))
+    ck("K9 设置内联带齐四件事",
+       all(any(v.startswith(p) for v in sl.values())
+           for p in ("st:speed", "st:quota", "st:parse", "st:recent")), list(sl))
+    ck("K9 设置内联带当前值", any("7s" in t for t in sl) and any("100" in t for t in sl), list(sl))
+    ck("K9 设置内联能进文案池", "st:pool" in sl.values(), list(sl.values()))
+    ck("K9 设置内联有回主菜单", "st:home" in sl.values(), list(sl.values()))
+    ck("K9 bot.py 的 _settings_kb 已改发内联面板",
+       "return settings_inline_kb(" in src_bot, "还在发底部键盘")
+    ck("K9 bot.py 不再把 settings_menu_kb 当新键盘用",
+       src_bot.count("buttons=_settings_kb()") > 0 and "settings_menu_kb(" not in
+       src_bot.split("def _settings_kb")[1].split("def _watch_kb")[0], "设置页还在用底部键盘")
 
     print()
     print("RESULT pass=%d fail=%d" % (ck.total - len(FAILS), len(FAILS)))

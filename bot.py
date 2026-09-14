@@ -55,7 +55,7 @@ from bot_menu import (
     watch_menu_text,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
-    pool_menu_kb, pool_menu_text, pool_inline_kb, pool_del_kb,
+    pool_menu_kb, pool_menu_text, pool_del_kb,
     pending_joins_inline_kb, pending_join_detail_kb,
 )
 import verify_relay
@@ -279,16 +279,17 @@ def _busy_tip(event) -> str:
 
 
 def _settings_kb():
-    """系统设置键盘（底部，按钮文字上带当前值）。
+    """系统设置键盘（消息附带内联，老板 21:25 退回内联）。
 
-    只留这一套：以前消息上还附一排内联开关，同一个设置两个地方各一个，
-    看着就乱——现在内联面板只给老消息用（点了仍生效），新消息全走底部。
+    上次理解反了：老板要的「消息键盘」= 挂在设置消息下面的内联按钮，
+    不是底部 ReplyKeyboard。这里直接发 settings_inline_kb。
     """
-    return settings_menu_kb(
+    return settings_inline_kb(
         recent_on=bool(state.get("recent_only_days")),
         repeat_on=bool(state.get("allow_repeat")),
         speed=state.get("min_delay"),
         quota=state.get("daily_limit"),
+        parse_label=PARSE_LABEL.get(state.get("parse_mode"), "纯文本"),
     )
 
 
@@ -960,11 +961,7 @@ def register_handlers(bot, accounts):
                 buttons=group_del_confirm_kb())
             return
 
-        # 1.3 删除文案按钮（消息键盘）→ 删掉那一条，删完接着列剩下的
-        m_pool = re.match(r"^🗑 文案 (\d+) ·", text)
-        if m_pool:
-            await _pool_del_one(event, m_pool.group(1))
-            return
+        # 1.3 删除文案已改走内联回调 pl:d:<msg_id>，不再靠按钮文字匹配
 
         # 2. 数字快捷选群已废除（群发不再选群）
         # 3. 有 pending 输入 → 消费
@@ -1054,15 +1051,16 @@ def register_handlers(bot, accounts):
                 pass
 
     async def _cb_settings(event, rest):
-        """设置内联按钮（旧消息上的面板）：st:recent / st:repeat / st:join / st:parse /
-        st:speed:+5 / st:quota:-10 / st:home
-
-        新版底部键盘已经接管了这些开关；内联面板只保住兼容：以前发出去的
-        设置消息还能点，但改完后同时把底部键盘刷成新状态。
+        """设置内联按钮（消息附带键盘，老板 21:25 要的就是这个）：
+        st:recent / st:repeat / st:parse / st:speed:+5 / st:quota:-10 / st:pool / st:home
         """
         if rest == "home":
             await event.answer()
             await _push_main_menu(event)
+            return
+        if rest == "pool":
+            await event.answer()
+            await _reply(event, pool_menu_text(db_count_pool()), buttons=pool_menu_kb())
             return
         s = _load_settings()
         tip = ""
@@ -1131,44 +1129,39 @@ def register_handlers(bot, accounts):
         await _reply(event, text, buttons=pool_menu_kb())
 
     async def _pool_del_menu(event):
-        """删除文案：每条一个序号按钮（消息键盘），点一条删一条。"""
+        """删除文案：每条一个内联按钮（callback 带真实 msg_id，不靠文字匹配）。"""
         _ok, text, rows = _pool_list_text()
         if not rows:
             await _reply(event, text, buttons=pool_menu_kb())
             return
-        # 序号→真实条目 按人存住，免得列表变动后删错
-        state.setdefault("pool_del_map_by", {})[str(event.sender_id)] = {
-            str(i): r for i, r in enumerate(rows, 1)}
         await _reply(event,
                      "🗑 点一条删一条（共 %d 条，前 30）：" % db_count_pool(),
                      buttons=pool_del_kb(rows))
 
-    async def _pool_del_one(event, no):
-        """按序号删一条文案，删完直接给剩下的列表（可连续删）。"""
-        rows_map = (state.get("pool_del_map_by") or {}).get(str(event.sender_id)) or {}
-        hit = rows_map.get(str(no))
-        if not hit:
-            await _reply(event, "⚠️ 这条已经不在了，请重新点「🗑 删除文案」。",
-                         buttons=pool_menu_kb())
-            return
-        source, mid, _t = hit
-        db_del_pool(source, int(mid))
-        _audit(event, "pool_del", str(mid))
-        _ok, text, rows = _pool_list_text()
-        if rows:
-            state.setdefault("pool_del_map_by", {})[str(event.sender_id)] = {
-                str(i): r for i, r in enumerate(rows, 1)}
-            await _reply(event, "🗑 已删 1 条。\n\n" + text, buttons=pool_del_kb(rows))
-        else:
-            await _reply(event, "🗑 已删，文案池现在是空的。\n\n" + text,
-                         buttons=pool_menu_kb())
-
     async def _cb_pool(event, arg):
-        """文案池内联：pl:d:<id> 删单条 / pl:clear 清空 / pl:back 返回"""
+        """文案池内联键盘：pl:new 新建 / pl:list 已有 / pl:del 删除列表 /
+        pl:d:<msg_id> 删一条 / pl:home 回设置 / pl:back 回文案池菜单（pl:clear 兼容旧消息）。"""
+        if arg == "home":
+            await event.answer()
+            await _reply(event, _settings_text(), buttons=_settings_kb())
+            return
         if arg == "back":
             await event.answer()
-            await _reply(event, pool_menu_text(db_count_pool(), bool(state.get("pool_random"))),
+            await _reply(event, pool_menu_text(db_count_pool()),
                          buttons=pool_menu_kb())
+            return
+        if arg == "new":
+            await event.answer()
+            pending_action[event.sender_id] = "pool_add_prompt"
+            await _reply(event, INPUT_HINTS["pool_add_prompt"], buttons=pool_menu_kb())
+            return
+        if arg == "list":
+            await event.answer()
+            await _pool_list(event)
+            return
+        if arg == "del":
+            await event.answer()
+            await _pool_del_menu(event)
             return
         if arg == "clear":
             n = db_clear_pool()
@@ -1190,9 +1183,8 @@ def register_handlers(bot, accounts):
             db_del_pool(hit[0], mid)
             _audit(event, "pool_del", str(mid))
             _ok, text, rows = _pool_list_text()
-            # 删除入口已改走消息键盘：旧内联按钮点完不再就地重挂内联列表
-            await event.edit(text, buttons=pool_menu_kb())
-            await event.answer("已删除，继续删请点「🗑 删除文案」")
+            await event.edit(text, buttons=pool_del_kb(rows) if rows else pool_menu_kb())
+            await event.answer("已删除")
             return
         await event.answer()
 

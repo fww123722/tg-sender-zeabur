@@ -327,9 +327,9 @@ def group_pick_inline_kb(groups):
 
 def settings_inline_kb(recent_on=False, repeat_on=False, parse_label="纯文本",
                        speed=None, quota=None):
-    """系统设置（内联键盘）：开关用绿/灰表示开/关，数字项用 +/- 步进。
+    """系统设置（消息附带内联键盘）：老板 21:25「我要的是消息附带键盘，不是底部键盘」。
 
-    旧消息上的面板，保留可点；新消息走底部键盘。
+    开关用文字 开/关 表示，数字项用 +/- 步进；不靠颜色表达状态。
     补录相关不在这上面：那个完全自动跑，不给开关也不给窗口设置。
     """
     def _sw(on):
@@ -350,6 +350,7 @@ def settings_inline_kb(recent_on=False, repeat_on=False, parse_label="纯文本"
         _row(Button.inline(f"¶ 文本模式　{parse_label}", b"st:parse")),
         _row(Button.inline(f"🕒 近7天活跃　{_sw(recent_on)}", b"st:recent"),
              Button.inline(f"🔁 重复推广　{_sw(repeat_on)}", b"st:repeat")),
+        _row(Button.inline(BTN["pool"], b"st:pool")),
         _row(Button.inline(BTN["back"], b"st:home")),
     ]
 
@@ -431,10 +432,7 @@ def profile_menu_kb():
 
 
 def settings_menu_kb(recent_on=False, repeat_on=False, speed=None, quota=None):
-    """系统设置键盘（全局唯一一套）：两行功能键 + 主菜单。
-
-    补录相关不在这上面：那个完全自动跑，不给开关也不给窗口设置。
-    """
+    """（已废弃：设置改回消息附带内联键盘）保留签名以防旧调用点。"""
     return _kb([
         (BTN["set_speed"], BTN["set_quota"]),
         (BTN["set_parsemode"], BTN["pool"]),
@@ -455,32 +453,32 @@ def settings_speed_quota_kb(speed=None, quota=None):
 
 
 def pool_menu_kb():
-    """文案池菜单（老板 20:27：就三件事）：新建 / 已有 / 删除，全走消息键盘。"""
-    return _kb([
-        (BTN["pool_add"], BTN["pool_list"]),
-        (BTN["pool_del"],),
-        (BTN["back_settings"],),
-    ])
+    """文案池菜单（消息附带内联键盘）：就三件事 新建 / 已有 / 删除。"""
+    return [
+        _row(Button.inline(BTN["pool_add"], b"pl:new"),
+             Button.inline(BTN["pool_list"], b"pl:list")),
+        _row(Button.inline(BTN["pool_del"], b"pl:del")),
+        _row(Button.inline(BTN["back_settings"], b"pl:home")),
+    ]
 
 
 def pool_del_kb(items):
-    """删除文案（消息键盘）：每条一个「🗑 文案 N · 开头」，和删群的「🗑 N ·」不撞。
-    items: [(source, msg_id, text), ...]，按传入顺序编号。"""
-    rows = []
-    for i, (_src, _mid, t) in enumerate(items, 1):
-        head = " ".join(str(t or "").split())[:16] or "（空）"
-        rows.append((f"🗑 文案 {i} · {head}",))
-    rows.append((BTN["back_settings"],))
-    return _kb(rows)
+    """删除文案（消息附带内联键盘）：每条一个按钮，回调直接带真实 msg_id。
 
-
-def pool_inline_kb(rows):
-    """（已废弃：删除文案改走消息键盘）旧消息上挂着 pl: 按钮的兼容入口。"""
-    btns = []
-    for i, (source, msg_id, _text) in enumerate(rows, 1):
-        btns.append([Button.inline(f"删 第{i}条", ("pl:d:%d" % msg_id).encode())])
-    btns.append([Button.inline("🗑 全部清空", b"pl:clear"),
-                 Button.inline(BTN["cancel_pick"], b"pl:back")])
+    走 callback 不靠按钮文字正则匹配，所以不会出现「删文案误触发退群」那种撞车。
+    items: [(source, msg_id, text), ...]，按传入顺序编号。
+    """
+    btns, cur = [], []
+    for i, (_src, mid, t) in enumerate(items, 1):
+        head = " ".join(str(t or "").split())[:12] or "（空）"
+        cur.append(Button.inline(f"🗑 {i} · {head}",
+                                 ("pl:d:%d" % int(mid)).encode()))
+        if len(cur) == 2:
+            btns.append(cur)
+            cur = []
+    if cur:
+        btns.append(cur)
+    btns.append([Button.inline(BTN["cancel_pick"], b"pl:back")])
     return btns
 
 
