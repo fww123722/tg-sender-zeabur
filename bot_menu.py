@@ -272,9 +272,7 @@ def main_menu_kb(is_operator: bool = False):
 
 
 def campaign_menu_kb(stage=0, running=False, paused=False):
-    """群发运营键盘：**只给此刻真能按的键**。
-
-    不再选群（老板：「群发推广不再需要选择群聊」）：目标准备就是全库名单，
+    """群发运营键盘（底部键盘）：**只给此刻真能按的键**。
     按录入时间从新到旧发。所以只剩两步：写文案 → 确认开跑。
     stage：0=还差文案　1=文案已有（可开跑）——只把该按那一步标绿，排版不变。
     running/paused：有任务在跑时整排换成控制键，不会把开跑键重复摆着让人重发。
@@ -293,6 +291,21 @@ def campaign_menu_kb(stage=0, running=False, paused=False):
     ]
     hot = BTN["camp_step3"] if stage == 0 else BTN["camp_start"]
     return _kb(rows, {hot: "success"})
+
+
+def campaign_ctl_kb(phase="run"):
+    """进度消息自带的内联控制键盘：暂停/继续 + 取消，就这一排。
+
+    老板要求：开跑后只有一条消息，控制按钮挂在这条消息上，点一次只弹
+    toast，不追发消息。phase：run=在发（给暂停）　paused=已暂停（给继续）
+    done=收尾（不再给可点的键，防点空）。"""
+    if phase == "done":
+        return None
+    paused = phase == "paused"
+    go = BTN["resume"] if paused else BTN["pause"]
+    act = "resume" if paused else "pause"
+    return [[Button.inline(go, f"cp:{act}".encode()),
+             Button.inline(BTN["cancel_pick"], b"cp:cancel")]]
 
 
 def _clean_title(g, n=18):
@@ -527,30 +540,22 @@ def main_menu_text(accounts, groups_count, unsent_count, pool_count, busy: bool,
         tag = name or "admin"
     else:
         tag = ("操作员：" + name) if name else "操作员"
-    head = f"📋 控制面板｜{tag}\n\n"
-    lock = f"\n🔒 当前占用：{busy_tip}\n" if busy and busy_tip else ""
+    lock = f"｜占用：{busy_tip}" if busy and busy_tip else ""
     return (
-        head +
-        f"👤 账号: {len(accounts)} 个在线 | "
-        f"📁 群组: {groups_count} 个 | "
-        f"📨 未发送: {unsent_count} 人\n"
-        f"📝 文案池: {pool_count} 条\n"
-        f"{'⏳ 任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
+        f"📋 控制面板｜{tag}\n"
+        f"👤 {len(accounts)} 号 | 📁 {groups_count} 群 | 📨 未发 {unsent_count} | "
+        f"📝 池 {pool_count}\n"
+        f"{'⏳ 任务中…' if busy else '🟢 空闲'}{lock}"
         + ("" if role == "owner"
-           else "ℹ️ 操作员：功能已全开，仅增删操作员需找admin。\n")
+           else "\nℹ️ 操作员功能全开，仅增删操作员需找admin。")
     )
 
 
 def campaign_menu_text():
-    """群发运营菜单文本（不选群版：就两步）。"""
-    return (
-        "🚀 群发运营｜就两步\n\n"
-        "① 写文案 — 直接发文案（支持 HTML）\n"
-        "② 确认开跑 — 自动检查账号后开跑\n\n"
-        "不用选群：目标自动就是一切群里的人，按录入时间从新到旧发\n"
-        "（刚补录进来的新面孔先收到），发过的人自动跳过。\n"
-        "绿键 = 现在该按的那个；跑起来后这一排会变成暂停/继续/停止。"
-    )
+    """群发运营菜单文本（不选群版：就两步，一句话说完）。"""
+    return ("🚀 群发运营｜两步：① 写文案 → ② 确认开跑\n"
+            "不用选群：默认打所有群的人（新面孔先发），发过的自动跳过。\n"
+            "开跑后只有一条进度消息，暂停/取消就挂在那条消息上。")
 
 
 def groups_menu_text(is_operator: bool = False):

@@ -202,6 +202,8 @@ state = {
     "busy_by": None,   # 当前占用号池的人 {uid, name, at}
     "paused": False,
     "stop": False,
+    "refresh": False,  # 群发控制（暂停/继续/取消）置位：让那条进度消息立刻重刷
+    "live": None,      # 当前唯一的进度消息快照 {text, at, msg}
     "min_delay": MIN_DELAY,
     "max_delay": MAX_DELAY,
     "daily_limit": DAILY_LIMIT,

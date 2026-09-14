@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """群发引擎：多账号并发私聊、群组广播、频道转发。支持纯文本与图文/文件群发。"""
 import asyncio
+import os
 import random
 import time
 
@@ -9,6 +10,14 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import InputPeerUser
 
 from config import BATCH_SIZE, BATCH_SLEEP, COOLDOWN_SEC, MAX_FLOOD_WAIT, log, state
+
+# 群发全程只维护「一条」进度消息（老板要求）：
+#   REPORT_INTERVAL 默认 20 秒心跳一次；状态变化（暂停/达上限）走 dirty 提前刷一次。
+#   两次真实编辑之间强制拉开 EDIT_MIN_INTERVAL，避免自己撞 Telegram 的 edit 频控。
+REPORT_INTERVAL = float(os.environ.get("REPORT_INTERVAL", "20"))
+EDIT_MIN_INTERVAL = float(os.environ.get("EDIT_MIN_INTERVAL", "1.2"))
+# 暂停标记（多个 worker 共用，靠它保证只刷一次）
+PAUSE_NOTE = "⏸已暂停"
 from db import (
     db_add_sent,
     db_bump_sent,
@@ -180,33 +189,88 @@ def _mark_cooldown(acc_no, err):
         log.warning(f"[账号{acc_no}] 冷却记账失败: {e}")
 
 
+# 进度消息的按钮占位：不传就等于「保留原键盘」，不许偷偷清空。
+_KEEP = object()
+_edit_at = {"t": 0.0}
+
+
+async def _throttle_edit():
+    """同一条进度消息两次真编辑之间拉开 EDIT_MIN_INTERVAL，从源头不自造限流。"""
+    delta = EDIT_MIN_INTERVAL - (time.time() - _edit_at["t"])
+    if delta > 0:
+        await asyncio.sleep(delta)
+    _edit_at["t"] = time.time()
+
+
+def _is_gone(e) -> bool:
+    """原消息已不存在/无权改（被删、被清）：这种情况才允许重发一条顶上去。"""
+    low = str(e).lower()
+    return ("message_id_invalid" in low or "message_to_edit_not_found" in low
+            or "chat_write_forbidden" in low or "messages_not_modified" in low)
+
+
 async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, image=None,
-                             bot=None, msg=None, pool=None):
+                             bot=None, msg=None, pool=None, ctl_kb=None):
     """多账号从共享队列领目标并发发送。
-    msg：已存在的进度消息（Telethon Message）。传了的话，开始/进度/暂停/汇总
-    全部**原地编辑这一条**，不再追加新消息（老板要求：不要额外发消息）。
+
+    全程只维护**一条**进度消息（老板要求）：开始/进度/暂停/汇总全部原地编辑
+    msg 那一条，编辑撞限流就退避重试，绝不因为改不动而退化成新发一条。
     pool：文案池文本列表，传了则每个目标随机挑一条（轮换文案）。
+    ctl_kb：paused -> 内联键盘，让进度消息自己带「暂停/取消」按钮。
     汇报统一走控制 Bot（bot 参数），不占用群发账号；bot 缺失时回退账号1。"""
     # targets: {uid: {"username": ..., "access_hash": ...}}
+    ctl_kb = ctl_kb if callable(ctl_kb) else None
 
-    async def _report(msg_text):
-        """统一汇报通道：能改就改旧消息，改不了才新发一条。"""
+    def _kb_now():
+        """进度的键盘：带了控制键盘就跟着状态切，没带则保留原样（不清空）。"""
+        if ctl_kb is None:
+            return _KEEP
+        return ctl_kb("paused" if state.get("paused") else "run")
+
+    async def _report(msg_text, buttons=_KEEP):
+        """只改那一条消息：节流 -> 撞限流退避重试 -> 才考虑重发。"""
         nonlocal msg
         sender = bot or (accounts[0][1] if accounts else None)
         if sender is None:
             return
-        if msg is not None:
+        if msg is None:
             try:
-                await msg.edit(msg_text)
+                kb = _kb_now()
+                msg = await sender.send_message(
+                    owner_entity, msg_text,
+                    **({} if kb is _KEEP else {"buttons": kb}))
+            except Exception:
+                log.warning("汇报消息发送失败")
+            return
+        for _attempt in range(5):
+            await _throttle_edit()
+            try:
+                msg = await (msg.edit(msg_text) if buttons is _KEEP
+                             else msg.edit(msg_text, buttons=buttons))
                 return
             except Exception as e:
                 if _is_not_modified(e):
                     return
-                log.info("进度消息编辑失败，改为新发一条：%s", e)
-        try:
-            msg = await sender.send_message(owner_entity, msg_text)
-        except Exception:
-            log.warning("汇报消息发送失败")
+                secs = getattr(e, "seconds", None)
+                low = str(e).lower()
+                if secs is not None or "flood" in low or "slowdown" in low \
+                        or "try again later" in low:
+                    await asyncio.sleep(min(int(secs or 0) or 2, 6))
+                    continue
+                if _is_gone(e):
+                    # 原消息已被删：重发一条顶上去，仍然全场只有这一条
+                    log.info("进度消息已不在，重发一条顶上去：%s", e)
+                    try:
+                        kb = _kb_now()
+                        msg = await sender.send_message(
+                            owner_entity, msg_text,
+                            **({} if kb is _KEEP else {"buttons": kb}))
+                    except Exception:
+                        log.warning("汇报消息发送失败")
+                    return
+                log.warning("进度消息编辑失败，稍后重试：%s", str(e)[:120])
+                await asyncio.sleep(1)
+        log.warning("进度消息多次编辑失败，保留旧文等下个周期再改")
 
     def _pick_text():
         return random.choice(pool) if pool else text
@@ -257,31 +321,41 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     finished = set()
 
     async def progress_reporter():
-        """后台协程：每 15 秒向 owner 汇总推送一次进度"""
+        """后台协程：每 REPORT_INTERVAL 秒刷一次那唯一的进度消息；
+        bot 那边点了暂停/继续/取消会置 state['refresh']，这里秒级响应。"""
         while True:
-            await asyncio.sleep(15)
+            slept = 0.0
+            while slept < REPORT_INTERVAL:
+                await asyncio.sleep(0.5)
+                slept += 0.5
+                if state.get("refresh") or state["stop"]:
+                    break
+            state["refresh"] = False
             if progress["done"] >= progress["total"] or state["stop"]:
                 return
-            await _report_progress(owner_entity, accounts, progress)
+            await _report_progress()
 
-    async def _report_progress(owner_entity, accounts, progress):
+    def _snap():
+        """进度文本（精简到两行，不列每账号明细）。"""
         total = progress["total"] or 1
         done = progress["done"]
         pct = done / total * 100
-        # 进度条：10 格，▰ 完成 ▱ 剩余
-        filled = int(pct // 10)
-        bar = "▰" * filled + "▱" * (10 - filled)
-        lines = [
-            f"📊 群发进度 {bar} {pct:.0f}%",
-            f"   {done}/{total} | ✅ {progress['sent']} ❌ {progress['fail']} ⏭ {progress['skipped']}",
-        ]
-        # 老板要求：进度不列每账号明细，只报总计
-        if progress.get("note"):
-            lines.append("   " + progress["note"])
-        snap = "\n".join(lines)
-        # 戒给「📋 查看进度」按钮读（它不能自己编一份假的）
-        state["live"] = {"text": snap, "at": int(time.time())}
-        await _report(snap)
+        filled = int(min(100.0, pct) * 8 // 100)
+        bar = "▰" * filled + "▱" * (8 - filled)
+        line = f"📊 {bar} {pct:.0f}%  {done}/{total}"
+        tail = f"✅{progress['sent']} ❌{progress['fail']} ⏭{progress['skipped']}"
+        # 状态自己读全局标：worker 在睡眠里还没发现暂停时，这条也不会漏说
+        note = progress.get("note") or ("🛑停止中" if state["stop"]
+                                        else (PAUSE_NOTE if state.get("paused") else ""))
+        if note:
+            tail += f"  {note}"
+        return line + "\n" + tail
+
+    async def _report_progress():
+        snap = _snap()
+        # 给「📈 查看进度」按钮读（它不能自己编一份假的）；带上 msg 让控制动作能原地改它
+        state["live"] = {"text": snap, "at": int(time.time()), "msg": msg}
+        await _report(snap, buttons=_kb_now())
 
     async def worker(client, acc_no):
         """从共享队列不断领目标：能发就一直发（尽可能多发），
@@ -294,8 +368,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
             if len(avail) > 1 and acc_no in rate_limited_acc:
                 return
             if stats["sent_today"] >= state["daily_limit"]:
-                progress["note"] = f"🚫 账号{acc_no} 今日达上限，已停"
-                await _report_progress(owner_entity, accounts, progress)
+                progress["note"] = f"🚫 账号{acc_no} 达今日上限"
+                await _report_progress()
                 return
             try:
                 uid = task_q.get_nowait()
@@ -306,8 +380,10 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                 warmed = True
                 await asyncio.sleep(random.uniform(3, 8))
             if state["paused"]:
-                progress["note"] = "⏸ 已暂停"
-                await _report_progress(owner_entity, accounts, progress)
+                # 多个 worker 同时发现暂停：只有第一个立刻刷那条消息，不重复编辑
+                if progress["note"] != PAUSE_NOTE:
+                    progress["note"] = PAUSE_NOTE
+                    await _report_progress()
                 while state["paused"] and not state["stop"]:
                     await asyncio.sleep(5)
                 progress["note"] = ""
@@ -395,8 +471,8 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     retryable = {u: v for u, v in first_round_fail.items()
                  if _is_rate_limited(v[1]) or _is_bad_peer(v[1])}
     if retryable and len(avail) > 1 and not state["stop"]:
-        progress["note"] = f"🔁 换号补发 {len(retryable)} 个目标"
-        await _report_progress(owner_entity, accounts, progress)
+        progress["note"] = f"🔁 换号补发 {len(retryable)}"
+        await _report_progress()
         for i, (uid, (orig_acc, orig_err)) in enumerate(retryable.items()):
             info = targets.get(uid, {})
             tried = {orig_acc}
@@ -438,19 +514,26 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
                     break
                 await asyncio.sleep(random.uniform(state["min_delay"], state["max_delay"]))
 
-    pct = 100.0 if not progress["total"] else (progress["done"] / progress["total"] * 100)
-    # 老板要求：结果不列每账号明细；总计用全局计数器（per_acc 仍内部维护，供补发回冲）
-    summary = (f"✅ 多账号群发完成（{len(accounts)}个账号，{pct:.0f}%）\n"
-               f"合计：成功 {progress['sent']}，失败 {progress['fail']}，跳过 {progress['skipped']}")
-    extra = []
+    # 收尾：结果也写回同一条消息（不另发），文本精简到两行
+    progress["note"] = ""
+    total = progress["total"] or 1
+    pct = progress["done"] / total * 100
+    filled = int(min(100.0, pct) * 8 // 100)
+    bar = "▰" * filled + "▱" * (8 - filled)
+    summary = (f"✅ 群发完成 {bar} {pct:.0f}%\n"
+               f"{progress['sent']}/{total}  ✅成功 {progress['sent']}"
+               f" ❌失败 {progress['fail']} ⏭跳过 {progress['skipped']}")
+    tail = []
     if cooling_note:
-        extra.append(f"⏳ {cooling_note}")
+        tail.append(f"⏳ {len(accounts) - len(avail)} 号冷却未派活")
     if rate_limited_acc:
-        extra.append(f"⏳ 本轮给 {len(rate_limited_acc)} 个限流账号记了冷却"
-                     f"（约 {COOLDOWN_SEC // 60} 分钟），下批自动跳过")
-    if extra:
-        summary += "\n" + "；".join(extra)
-    await _report(summary)
+        tail.append(f"⏳ {len(rate_limited_acc)} 号记了冷却"
+                    f"（约 {COOLDOWN_SEC // 60} 分）")
+    if tail:
+        summary += "\n" + "；".join(tail)
+    state["live"] = {"text": summary, "at": int(time.time()), "msg": msg}
+    # 收尾：控制按钮摘掉（没活了），没带控制键盘的旧调用点则保留原样
+    await _report(summary, buttons=(None if ctl_kb is not None else _KEEP))
     return summary
 
 

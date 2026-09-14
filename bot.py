@@ -48,7 +48,7 @@ from ops_state import (
 )
 from bot_menu import (
     BTN, BTN_ACTION, INPUT_ACTIONS, INPUT_HINTS,
-    main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
+    main_menu_kb, campaign_menu_kb, campaign_ctl_kb, groups_menu_kb, accounts_menu_kb,
     settings_inline_kb, dashboard_menu_kb, dashboard_inline_kb, report_menu_kb, reason_menu_kb,
     group_del_kb, profile_menu_kb, group_del_confirm_kb,
     watch_menu_kb, settings_menu_kb,
@@ -796,38 +796,20 @@ def register_handlers(bot, accounts):
         elif action == "pool_del_menu":
             await _pool_del_menu(event)
         elif action == "camp_status":
-            # 在跑：给实时进度（与聊天里那条同文本）；没在跑：不编造进度、不贴草稿清单
+            # 在跑：进度就在上面那条消息里，不再新发一份（只轻刷它一下）；没在跑才发提示
             live = state.get("live") or {}
             if state["busy"] and live.get("text"):
-                await _reply(event, live["text"], buttons=_camp_kb(event.sender_id))
+                state["refresh"] = True
+                m = live.get("msg")
+                if m is None:
+                    await _reply(event, live["text"], buttons=_camp_kb(event.sender_id))
             else:
                 await _reply(event, "ℹ️ 当前没有在跑的任务。", buttons=_camp_kb(event.sender_id))
         elif action == "camp_start":
             await _do_start(event, accounts)
-        elif action == "pause" or action == "resume":
-            b = state.get("busy_by") or {}
-            if not state["busy"]:
-                await _reply(event, "ℹ️ 现在没有在跑的任务。")
-                return
-            who = b.get("name") or "未知"
-            if action == "pause":
-                state["paused"] = True
-                _audit(event, "pause", "暂停了 " + who + " 的任务")
-                await _reply(event, "⏸ 已暂停（点「继续」恢复）",
-                             buttons=_camp_kb(event.sender_id))
-            else:
-                state["paused"] = False
-                _audit(event, "resume", "继续了 " + who + " 的任务")
-                await _reply(event, "▶️ 已继续", buttons=_camp_kb(event.sender_id))
-        elif action == "stop":
-            b = state.get("busy_by") or {}
-            who = b.get("name") or "当前任务"
-            state["stop"] = True
-            state["paused"] = True
-            _clear_busy()
-            release_list(b.get("uid"))
-            _audit(event, "stop", "停掉了 " + who + " 的任务")
-            await _reply(event, "🛑 已停止当前任务", buttons=_camp_kb(event.sender_id))
+        elif action in ("pause", "resume", "stop"):
+            # 底部键盘的控制键与进度消息上的内联键走同一个口子：只改那一条消息
+            await _camp_ctl(event, action)
         elif action == "set_recent_filter":
             _apply_settings_to_state()
             s = _load_settings()
@@ -958,7 +940,57 @@ def register_handlers(bot, accounts):
         lines.append("🔒 系统不自选按钮、不自算答案：每一次提交都得你在消息上点/打字。")
         await _reply(event, "\n".join(lines))
 
-    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 删群） ----------
+    async def _camp_ctl(event, action, via_cb=False):
+        """群发控制（暂停/继续/取消）：只改标志 + 要求刷新那一条进度消息，绝不追发。
+
+        老板：开工后只有一条消息。内联键点了只弹 toast；底部键点了则靠那条
+        进度消息自己变字（sender 汇报协程 0.5s 内响应 state['refresh']）。
+        """
+        if action == "cancel":
+            action = "stop"
+        if not state["busy"]:
+            if via_cb:
+                await event.answer("现在没有在跑的任务")
+            else:
+                await _reply(event, "ℹ️ 现在没有在跑的任务。", buttons=_camp_kb(event.sender_id))
+            return
+        b = state.get("busy_by") or {}
+        who = b.get("name") or "当前任务"
+        if action == "pause":
+            state["paused"] = True
+            tip = "⏸ 已暂停"
+            _audit(event, "pause", "暂停了 " + who + " 的任务")
+        elif action == "resume":
+            state["paused"] = False
+            tip = "▶️ 已继续"
+            _audit(event, "resume", "继续了 " + who + " 的任务")
+        elif action == "stop":
+            state["stop"] = True
+            state["paused"] = True
+            _clear_busy()
+            release_list(b.get("uid"))
+            tip = "🛑 已取消"
+            _audit(event, "stop", "停掉了 " + who + " 的任务")
+        else:
+            if via_cb:
+                await event.answer()
+            return
+        state["refresh"] = True
+        if via_cb:
+            await event.answer(tip)
+        else:
+            # 底部键盘没有 toast：能直接改那条进度消息就先改上（等不到下个心跳）
+            live = state.get("live") or {}
+            m = live.get("msg")
+            if m is not None:
+                try:
+                    await m.edit((live.get("text") or "") + f"\n{tip}",
+                                 buttons=campaign_ctl_kb(
+                                     "paused" if action != "stop" else "done"))
+                except Exception:
+                    pass
+
+    # ---------- 内联键盘回调（消息附带按钮：群发控制 / 系统设置 / 删群） ----------
     @bot.on(events.CallbackQuery)
     async def on_callback(event):
         if not is_authorized(event.sender_id):
@@ -966,7 +998,9 @@ def register_handlers(bot, accounts):
             return
         data = (event.data or b"").decode("utf-8", "replace")
         try:
-            if data.startswith("st:"):
+            if data.startswith("cp:"):
+                await _camp_ctl(event, data[3:], via_cb=True)
+            elif data.startswith("st:"):
                 if not is_authorized(event.sender_id):
                     await event.answer("⛔ 无权限", alert=True)
                     return
@@ -1393,11 +1427,11 @@ def register_handlers(bot, accounts):
             note = ""
             if html_like and pm in (None, "html"):
                 note = "\n已检测到 HTML 标签，将按 HTML 格式发送。"
-            body = (campaign_menu_text() + "\n\n✅ 文案已保存：\n"
-                    + text[:100] + ("…" if len(text) > 100 else "")
-                    + note + "\n\n" + campaign_text(event.sender_id)
-                    + f"\n\n✅ {len(ready)} 个账号就绪，名单 {db_count_targets()} 人。\n点「③ 确认开跑」开始群发。")
-            await _reply(event, body, buttons=_camp_kb(event.sender_id))
+            ready_note = f"✅ {len(ready)} 号就绪 · 名单 {db_count_targets()} 人"
+            await _reply(event,
+                "✅ 文案已存\n" + text[:60] + ("…" if len(text) > 60 else "")
+                + note + "\n" + ready_note + "，点「② 确认开跑」。",
+                buttons=_camp_kb(event.sender_id))
         elif action == "pool_add_prompt":
             db_add_pool_text(text)
             _audit(event, "pool_add", f"{len(text)} 字")
@@ -1641,19 +1675,21 @@ def register_handlers(bot, accounts):
     async def _run_and_finish(event, accounts, text, targets, sent_before=0, pool=None):
         uid = event.sender_id
         crashed = None
-        # 全程只维护这一条消息：开跑→进度→汇总全部原地改，不再追发
+        # 全程只维护这一条消息：开跑→进度→暂停→汇总全部原地改，控制按钮就挂在它上面
         msg = await _reply(event,
-            f"🚀 开始群发：{len(accounts)}个账号 | 间隔 {state['min_delay']}-{state['max_delay']}s",
-            buttons=_main_kb(event))
-        state["live"] = {"text": (msg.message if msg else "") or "", "at": int(time.time())}
+            f"🚀 群发中 · {len(accounts)} 号 · 名单 {len(targets)} 人",
+            buttons=campaign_ctl_kb("run"))
+        state["live"] = {"text": (msg.message if msg else "") or "",
+                         "at": int(time.time()), "msg": msg}
         try:
             try:
                 result = await send_to_list_multi(accounts, targets, text, event.chat_id,
-                                                  bot=bot, msg=msg, pool=pool)
+                                                  bot=bot, msg=msg, pool=pool,
+                                                  ctl_kb=campaign_ctl_kb)
             except Exception as e:
                 crashed = e
-                result = (f"❌ 群发异常中断：{type(e).__name__}: {str(e)[:200]}\n"
-                          "号池与名单已释放，草稿保留，可以直接重新开跑。")
+                result = (f"❌ 群发异常中断：{type(e).__name__}: {str(e)[:120]}\n"
+                          "名单已释放，草稿保留，可直接重跑。")
             # 汇总已由 sender 写进同一条消息；这里再写一次是空操作（not modified 已吞）；崩溃路径则靠它补上
             await _edit_or_send(msg, event, result)
             done_n = max(0, db_sent_global() - sent_before)

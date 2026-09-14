@@ -82,7 +82,7 @@ try:
     SENT.clear(); BLK.clear(); _store.clear(); _stats.clear()
     r = asyncio.run(S.send_to_list_multi(accs(3), tgs(12), "FIXED", Cli(0), bot=Cli(0), pool=POOL))
     texts = [t for _, t in SENT]
-    ck("A: 12个目标全送达", "成功 12，失败 0" in r, r.replace("\n", " | ")[:120])
+    ck("A: 12个目标全送达", "12/12" in r and "❌失败 0" in r, r.replace("\n", " | ")[:120])
     ck("A: 发出的全在池内", all(t in POOL for t in texts), set(texts) - set(POOL))
     ck("A: 确实出现多种文案", len(set(texts)) >= 2, sorted(set(texts)))
     ck("A: 没把固定文案发出去", "FIXED" not in texts, set(texts))
@@ -91,21 +91,21 @@ try:
     SENT.clear(); _store.clear(); _stats.clear()
     r = asyncio.run(S.send_to_list_multi(accs(2), tgs(8), "FIXED", Cli(0), bot=Cli(0)))
     texts = [t for _, t in SENT]
-    ck("B: 8个全送达", "成功 8，失败 0" in r, r.replace("\n", " | ")[:120])
+    ck("B: 8个全送达", "8/8" in r and "❌失败 0" in r, r.replace("\n", " | ")[:120])
     ck("B: 全部用固定文案", all(t == "FIXED" for t in texts), sorted(set(texts)))
 
     # ---------------- C) pool=[] 回落不崩 ----------------
     SENT.clear(); _store.clear(); _stats.clear()
     r = asyncio.run(S.send_to_list_multi(accs(2), tgs(4), "FIXED", Cli(0), bot=Cli(0), pool=[]))
     ck("C: 空 pool 回落固定文案", all(t == "FIXED" for _, t in SENT), sorted({t for _, t in SENT}))
-    ck("C: 空 pool 不影响送达", "成功 4" in r, r.replace("\n", " | ")[:110])
+    ck("C: 空 pool 不影响送达", "✅成功 4" in r, r.replace("\n", " | ")[:110])
 
     # ---------------- D) 补发第二轮也走池 ----------------
     SENT.clear(); BLK.clear(); _store.clear(); _stats.clear()
     BLK = {"1"}                       # 账号 1 永远 430 → 要换号补发
     r = asyncio.run(S.send_to_list_multi(accs(3), tgs(6), "FIXED", Cli(0), bot=Cli(0), pool=POOL))
     texts = [t for _, t in SENT]
-    ck("D: 换号补发后仍全送达", "成功 6，失败 0" in r, r.replace("\n", " | ")[:120])
+    ck("D: 换号补发后仍全送达", "6/6" in r and "❌失败 0" in r, r.replace("\n", " | ")[:120])
     ck("D: 补发的文案也在池内", all(t in POOL for t in texts), set(texts) - set(POOL))
     ck("D: 没漏发固定文案", "FIXED" not in texts, sorted(set(texts)))
 finally:
@@ -125,6 +125,14 @@ ck("E: 池入口在菜单", '"menu_pool"' in B and "pool_menu_kb()" in B, "无�
 ms = inspect.getsource(S.send_to_list_multi)
 ck("F: 签名含 pool", "pool=None" in ms, ms[:120])
 ck("F: 两处调用点都用 _pick_text", ms.count("_pick_text()") >= 2, ms.count("_pick_text()"))
+
+# ---------------- G) 全程只维护一条进度消息（老板要求） ----------------
+ck("G: 进度条 8 格", '"▰" * filled + "▱" * (8 - filled)' in ms, "不是 8 格")
+ck("G: 接受内联控制键盘 ctl_kb", "ctl_kb=None" in ms, "无 ctl_kb")
+ck("G: 旧的「改不动就新发」退化路径已清除",
+   "进度消息编辑失败，改为新发一条" not in ms, "仍有旧文本")
+ck("G: 汇总也只改那一条（不另发）",
+   ms.count("await _report(") == 2 and ms.count("sender.send_message") == 2, ms.count("await _report("))
 
 print("\n" + ("POOL_ALL_OK" if not FAILS else "POOL_FAILED: %s" % FAILS))
 sys.exit(1 if FAILS else 0)
