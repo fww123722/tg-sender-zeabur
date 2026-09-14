@@ -1142,6 +1142,9 @@ def register_handlers(bot, accounts):
             r += (f"\n\n📊 本次名单净增 {net} 人"
                   f"（重拉不清空，原有的人保留，同一人自动合并不会重复）。")
             await _reply(event, r, buttons=_groups_kb(event))
+            # 一个人都没进（不在这个群/链接失效）：不要把名单锁着白白挡别人 30 分钟
+            if net <= 0 and r.startswith("❌"):
+                release_list(uid)
         finally:
             _clear_busy()
 
