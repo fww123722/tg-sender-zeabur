@@ -321,8 +321,11 @@ async def _watch_now(event):
         await _reply(event, _busy_tip(event), buttons=_watch_kb())
         return
     _audit(event, "watch_now", "手动补扫")
-    await _reply(event, "⚡ 正在逐群补扫（只读窗口内的新消息，不会重翻历史）…",
-                 buttons=_watch_kb())
+    await _reply(event,
+        f"⚡ 开始逐群补扫：每个群先拉一次成员（只收近 {member_watch.window_days()} 天进群的），"
+        f"再把近 {member_watch.window_days()} 天的消息整段读完（发言人也收）。\n"
+        "读满为止，不会读几百条就停；完成后每个群会报「+几人 / 读了多少条 / 覆盖到哪天」。",
+        buttons=_watch_kb())
     asyncio.ensure_future(member_watch.sweep_once(reason="手动"))
 
 

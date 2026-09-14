@@ -38,10 +38,15 @@ from db import (
 # 新人窗口（天）：只收这段时间内进群/第一次冒出来的人（老板点名的 3 天）
 # 写死在此，不给开关也不给设置项：要改就改这一行（或环境变量）重部。
 JOIN_WINDOW_DAYS = int(os.environ.get("JOIN_WINDOW_DAYS", "3"))
-# 兜底补扫间隔（分钟）
-SWEEP_INTERVAL_MIN = int(os.environ.get("MEMBER_SWEEP_MIN", "20"))
-# 单次补扫最多翻多少条（防大群把请求打爆）
-SWEEP_MSG_LIMIT = int(os.environ.get("MEMBER_SWEEP_LIMIT", "300"))
+# 定时补扫间隔（分钟）。老板 22:56：「每天发一次就好」+「读取太快了」→ 改成**一天一轮**。
+# 实时监听（有人发言/进群当场入名单）不受影响，所以一天一轮不会漏新人。
+SWEEP_INTERVAL_MIN = int(os.environ.get("MEMBER_SWEEP_MIN", "1440"))
+# 单群一轮最多读多少条消息。老板 23:00：「读取的很明显不是近三天，人不可能这么少」
+# —— 上一版是 300：活跃群 300 条只覆盖几个小时，等于根本没读满窗口。
+# 现在分页读，一直读到越过 3 天边界为止，只有下面这两个上限会提前停。
+SWEEP_MSG_LIMIT = int(os.environ.get("MEMBER_SWEEP_LIMIT", "20000"))
+SWEEP_PAGE = int(os.environ.get("MEMBER_SWEEP_PAGE", "2000"))
+SWEEP_MAX_PAGES = int(os.environ.get("MEMBER_SWEEP_PAGES", "10"))
 # 每轮拉成员的人数上限（同 collector.collect_members 默认量级，只取近 3 天进群的）
 MEMBER_PULL_LIMIT = int(os.environ.get("MEMBER_PULL_LIMIT", "5000"))
 
@@ -50,12 +55,24 @@ _clients = []         # [(acc_no, client)]
 _seen = set()         # 已处理过的 uid，避免每条消息都写库
 _seeing = set()       # 正在处理中的 uid（并发去重）
 _stats = {"realtime": 0, "sweep": 0, "members": 0, "msgs": 0, "groups": 0,
-          "last_sweep": 0, "last_err": "", "started_at": 0}
+          "read": 0, "nouser": 0, "last_sweep": 0, "last_err": "", "started_at": 0}
+_nack = set()         # 解析过但确定不能用的人（无用户名/机器人），不再反复发请求
 _task = None
 _HANDLED_TYPES = tuple(t for t in (MessageActionChatAddUser,
                                    MessageActionChatJoinedByLink,
                                    MessageActionChatJoinedByRequest,
                                    MessageActionUserJoined) if t)
+
+
+def _interval_human() -> str:
+    """把间隔说人话：1440 分钟 → 「每 1 天」。"""
+    m = SWEEP_INTERVAL_MIN
+    if m % 1440 == 0:
+        d = m // 1440
+        return "每 %d 天" % d
+    if m % 60 == 0:
+        return "每 %d 小时" % (m // 60)
+    return "每 %d 分钟" % m
 
 
 def window_days() -> int:
@@ -235,7 +252,11 @@ async def _pull_members(client, gid, title):
     """
     try:
         from collector import collect_members
-        res = await collect_members(client, _peer(gid), limit=MEMBER_PULL_LIMIT,
+        try:
+            entity = await _entity_of(client, gid)
+        except Exception:
+            return -1
+        res = await collect_members(client, entity, limit=MEMBER_PULL_LIMIT,
                                    recent_only_days=0, join_days=JOIN_WINDOW_DAYS,
                                    via="member_sweep")
         if not isinstance(res, str) or not res.startswith("✅"):
@@ -251,15 +272,74 @@ async def _pull_members(client, gid, title):
         return -1
 
 
-async def _sweep_one(client, gid, title):
-    """一个群补扫一轮：先拉成员（近3天进群的），再读近 3 天消息收发言人。
+async def _read_window(client, entity, gid, cutoff, my_id):
+    """把一个群「近 N 天的消息」整段读完，发言人入名单。
 
-    老板 21:45 的口径：不再只从水位线往后读，而是**每轮都读窗口内的全部消息**，
-    因为重启/掉线之后光标可能比 3 天更新，只从光标往后读会漏人。
-    返回新入人数（拉成员 + 读消息）；负数 = 这个群这个账号读不动。
+    分页翻（offset_id 往前推），直到：① 翻到比窗口更老的消息（读完了）
+    ② 撞总条数/页数上限（没读满，调用方要看 full 标记）。
+    返回 dict：added/read/full/oldest/nouser。
     """
-    added = 0
-    top = db_watch_cursor(gid)
+    added = read = nouser = 0
+    oldest = None
+    top = 0
+    full = False
+    offset = 0
+    for _page in range(SWEEP_MAX_PAGES):
+        last_id = None
+        n = 0
+        async for msg in client.iter_messages(entity, limit=SWEEP_PAGE, offset_id=offset):
+            n += 1
+            read += 1
+            mid = int(getattr(msg, "id", 0) or 0)
+            if mid:
+                last_id = mid
+                top = max(top, mid)          # 游标记最新一条，不是最旧
+            d = getattr(msg, "date", None)
+            if d is not None and d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            if d is not None:
+                if oldest is None or d < oldest:
+                    oldest = d
+                if d < cutoff:
+                    full = True          # 已翻出窗口边界，3 天读完了
+                    break
+            sid = getattr(msg, "sender_id", None)
+            if not sid or sid in _seen or sid in _seeing or sid in _nack:
+                continue
+            u = getattr(msg, "sender", None)
+            if not isinstance(u, User):
+                u = await _resolve(client, sid)
+            if u is None:
+                _nack.add(sid)           # 拿不到实体的（申请不进群的人）只试一次
+                continue
+            if not _ok_user(u, my_id):
+                if not getattr(u, "username", None) and not getattr(u, "bot", None):
+                    nouser += 1
+                _nack.add(sid)
+                continue
+            if _add(u, gid, "sweep", d):
+                added += 1
+            elif isinstance(u, User) and not u.username:
+                nouser += 1
+        _stats["read"] = _stats.get("read", 0) + n
+        if full or n == 0 or not last_id or last_id == offset:
+            break
+        offset = last_id
+        if read >= SWEEP_MSG_LIMIT:
+            break
+        await asyncio.sleep(0.4)         # 翻页之间喘一下，护号
+    _stats["nouser"] = _stats.get("nouser", 0) + nouser
+    return {"added": added, "read": read, "full": full,
+            "oldest": oldest, "nouser": nouser, "top": top}
+
+
+async def _sweep_one(client, gid, title):
+    """一个群补扫一轮：先拉成员（近3天进群的），再把近 3 天的消息整段读完收发言人。
+
+    返回 dict：ok/added/read/full/oldest/nouser（ok=False = 这个群这个号读不动，换号）。
+    """
+    out = {"ok": False, "added": 0, "read": 0, "full": False,
+           "oldest": None, "nouser": 0, "members": 0}
     cutoff = _cutoff()
     my_id = None
     try:
@@ -268,54 +348,56 @@ async def _sweep_one(client, gid, title):
     except Exception:
         pass
     try:
-        entity = await client.get_entity(_peer(gid))
+        entity = await _entity_of(client, gid)
     except Exception:
-        return -1        # 这个账号不在这个群：换下一个，别记失败
+        return out        # 这个账号不在这个群：换下一个，别记失败
     # 1) 先拉一次成员（近 3 天进群的）
     got_m = await _pull_members(client, gid, title)
     if got_m > 0:
-        added += got_m
-    # 2) 再读近 3 天的消息，发言人入名单
+        out["added"] += got_m
+        out["members"] = got_m
+    # 2) 再把近 3 天的消息整段读完（发言人入名单）
     try:
-        async for msg in client.iter_messages(entity, limit=SWEEP_MSG_LIMIT):
-            d = getattr(msg, "date", None)
-            if d is not None and d.tzinfo is None:
-                d = d.replace(tzinfo=timezone.utc)
-            if d is not None:
-                top = max(top, int(getattr(msg, "id", 0) or 0))
-                if d < cutoff:
-                    break   # 从新往老翻，翻过 3 天边界后面只会更老
-            sid = getattr(msg, "sender_id", None)
-            if not sid or sid in _seen or sid in _seeing:
-                continue
-            u = getattr(msg, "sender", None)
-            if not isinstance(u, User):
-                u = await _resolve(client, sid)
-            if u is None or not _ok_user(u, my_id):
-                continue
-            if _add(u, gid, "sweep", d):
-                added += 1
+        r = await _read_window(client, entity, gid, cutoff, my_id)
     except FloodWaitError as e:
         secs = getattr(e, "seconds", 0) or 0
-        _stats["last_err"] = f"补扫撞限流 {secs}s（群「{title or gid}」）"
+        _stats["last_err"] = f"读消息撞限流 {secs}s（群「{title or gid}」）"
         log.info(f"[补录] {secs} 秒限流，跳过「{title}」本轮")
-        return -1
+        out["added"] = max(0, out["added"])
+        out["ok"] = True         # 号是好的、群能读，只是限流：别再换号重读
+        return out
     except Exception as e:
         _stats["last_err"] = f"{type(e).__name__}: {str(e)[:80]}"
         log.info(f"[补录] 补扫「{title or gid}」出错: {type(e).__name__}: {str(e)[:100]}")
-        return -1
-    if top > db_watch_cursor(gid):
-        try:
-            db_watch_set(gid, title, top, new_since_last=added)
-        except Exception as e:
-            log.info(f"[补录] 游标推进失败(忽略): {e}")
-    return added
+        return out
+    out.update({k: r[k] for k in ("added", "read", "full", "oldest", "nouser")
+                if k in r and k != "added"})
+    out["added"] = out["added"] + r["added"]
+    out["ok"] = True
+    out["cursor"] = r.get("top", 0)
+    return out
 
 
 def _peer(gid):
-    """groups_info 存的是原始正数 id；默认按频道/超级群解析，失败再按 basic 群试。"""
-    from telethon.tl.types import PeerChannel, PeerChat
+    """默认按频道/超级群解析（groups_info 存的是原始正数 id）。"""
+    from telethon.tl.types import PeerChannel
     return PeerChannel(int(gid))
+
+
+async def _entity_of(client, gid):
+    """拿群实体：先按频道/超级群试，不行再按 basic 群（PeerChat）试。
+
+    上一版只试 PeerChannel：普通群（basic group）根本解不出来，直接就被归为
+    「没读到（不在群/受限）」，其实是我们自个儿解错了 id 格式。
+    """
+    from telethon.tl.types import PeerChat
+    last = None
+    for peer in (_peer(gid), PeerChat(int(gid))):
+        try:
+            return await client.get_entity(peer)
+        except Exception as e:
+            last = e
+    raise last or RuntimeError("get_entity 失败")
 
 
 async def sweep_once(reason="手动"):
@@ -324,30 +406,63 @@ async def sweep_once(reason="手动"):
     if not _claims:
         return "表里还没有群记录，先去「加群」或「批量导入」。"
     total_new = 0
+    total_read = 0
     lines = []
+    partial = []
     for gid, title in list(_claims.items()):
-        got = -1
+        res = {"ok": False, "added": 0, "read": 0, "full": False, "oldest": None}
         for acc_no, client in _clients:
             try:
                 if not await client.is_user_authorized():
                     continue
             except Exception:
                 continue
-            got = await _sweep_one(client, gid, title)
-            if got >= 0:
+            res = await _sweep_one(client, gid, title)
+            if res.get("ok"):
                 break
             await asyncio.sleep(0.3)
-        if got > 0:
-            total_new += got
-            lines.append(f"  · 「{(title or str(gid))[:18]}」+{got} 人")
-        elif got < 0:
-            lines.append(f"  · 「{(title or str(gid))[:18]}」没读到（不在群/受限）")
-        await asyncio.sleep(0.8)     # 别把请求连成一片，护号
+        got = int(res.get("added") or 0)
+        read = int(res.get("read") or 0)
+        total_new += got
+        total_read += read
+        name = (title or str(gid))[:18]
+        if not res.get("ok"):
+            lines.append(f"  · 「{name}」❌ 读不到（账号不在群/实体解不出）")
+            continue
+        cover = _cover_str(res)
+        lines.append(f"  · 「{name}」+{got} 人｜读了 {read} 条｜{cover}")
+        if not res.get("full"):
+            partial.append(name)
+        # 推进游标（只是记账，不影响下一轮读多少）
+        top = int(res.get("cursor") or 0)
+        if top > db_watch_cursor(gid):
+            try:
+                db_watch_set(gid, title, top, new_since_last=got)
+            except Exception as e:
+                log.info(f"[补录] 游标推进失败(忽略): {e}")
+        await asyncio.sleep(1.5)     # 群与群之间喘一下，护号
     _stats["last_sweep"] = int(time.time())
-    await _notify(f"📡 补录{reason}完成：{len(_claims)} 个群，新入 {total_new} 人"
-                  "（已拉成员 + 已读近 3 天消息）"
-                  + (("\n" + "\n".join(lines[:12])) if lines else "\n（没有新人）"))
-    return f"补扫完成：新增 {total_new} 人"
+    head = (f"📡 补录{reason}完成：{len(_claims)} 个群，新入 {total_new} 人"
+            f"｜共读了 {total_read} 条消息（窗口 {JOIN_WINDOW_DAYS} 天）")
+    if partial:
+        head += (f"\n⚠️ 这些群没读满 {JOIN_WINDOW_DAYS} 天（消息太多撞上限/限流）："
+                 + "、".join(partial[:6]))
+    await _notify(head + "\n" + "\n".join(lines[:14]))
+    return f"补扫完成：新增 {total_new} 人，读了 {total_read} 条消息"
+
+
+def _cover_str(res):
+    """把「读到哪天」说成人话，让老板能直接看出有没有读满 3 天。"""
+    d = res.get("oldest")
+    if d is None:
+        return "窗口内无消息"
+    try:
+        loc = d.astimezone() + timedelta(hours=8)   # 老板看北京时间
+        got_days = (datetime.now(timezone.utc) - d).total_seconds() / 86400.0
+        tag = "✅读满" if res.get("full") else "⚠只读到"
+        return f"{tag} {loc:%m-%d %H:%M}（约 {got_days:.1f} 天前）"
+    except Exception:
+        return str(d)
 
 
 async def _notify(text):
@@ -364,11 +479,11 @@ async def _notify(text):
 
 
 async def _loop():
-    """常驻循环：每隔 SWEEP_INTERVAL_MIN 分钟补扫一轮。"""
+    """常驻循环：每 SWEEP_INTERVAL_MIN 分钟（默认 1440 = 一天）补扫一轮。"""
     while True:
         try:
             await asyncio.sleep(SWEEP_INTERVAL_MIN * 60)
-            await sweep_once(reason="定时")
+            await sweep_once(reason="每日")
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -390,13 +505,13 @@ def status_text():
     out = ["📡 进群后自动补录：全部群常驻自动，无需设置",
            f"固定近 {JOIN_WINDOW_DAYS} 天：每轮拉成员（只收这段日期内进群的）"
            f"+ 读这段日期内的消息（发言人也收）",
-           f"盯的群：{len(_claims)} 个 | 在线账号：{len(_clients)} 个",
+           f"定时一轮：{_interval_human()}（上一轮只当过才报一次信，不刷屏）",
            f"本轮统计：实时收 {_stats['realtime']} 人 / 补扫收 {_stats['sweep']} 人"
            f" / 拉成员收 {_stats.get('members', 0)} 人"
            f"（看到 {int(_stats['msgs'])} 条群消息）"]
     lst = time.strftime("%m-%d %H:%M", time.localtime(_stats["last_sweep"])) \
         if _stats["last_sweep"] else "还没跑过"
-    out.append(f"上次补扫：{lst}（每 {SWEEP_INTERVAL_MIN} 分钟一轮）")
+    out.append(f"上次补扫：{lst}（{_interval_human()}一轮）")
     if by:
         out.append("名单构成：" + "、".join(f"{k} {v} 人" for k, v in by.items()))
     if rows:
@@ -430,7 +545,7 @@ def start(accounts=None, bot=None, owner=None):
     if _task is None:
         _task = asyncio.ensure_future(_loop())
     log.info(f"[补录] 已启动：{attached} 个账号挂监听，{n} 个群在盯，"
-             f"窗口 {JOIN_WINDOW_DAYS} 天，补扫每 {SWEEP_INTERVAL_MIN} 分钟")
+             f"窗口 {JOIN_WINDOW_DAYS} 天，补扫{_interval_human()}一轮")
     return attached, n
 
 

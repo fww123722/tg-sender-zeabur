@@ -227,6 +227,27 @@ def main():
        src_bot.count("buttons=_settings_kb()") > 0 and "settings_menu_kb(" not in
        src_bot.split("def _settings_kb")[1].split("def _watch_kb")[0], "设置页还在用底部键盘")
 
+    # ---------- K10 自动补录必须真读满近 3 天（老板 23:00：人不可能这么少）----------
+    mw = io.open(os.path.join(HERE, "member_watch.py"), encoding="utf-8").read()
+    ck("K10 消息上限不是当初的300（活跃群 300 条cover不住3天）",
+       '"MEMBER_SWEEP_LIMIT", "300")' not in mw, "还是 300 条就停")
+    ck("K10 是分页读（offset_id 往前翻），不是一遍 iter",
+       "offset_id=offset" in mw and "SWEEP_MAX_PAGES" in mw, "没分页")
+    ck("K10 只有翻过窗口边界才算读完（full 标记）",
+       "full = True" in mw and '"full"' in mw, "没覆盖率概念")
+    ck("K10 basic 群能解出实体（先 Channel 再 Chat）",
+       "async def _entity_of" in mw and "PeerChat(int(gid))" in mw, "还是只试 PeerChannel")
+    ck("K10 拉成员也走 _entity_of（不再直接丢 _peer）",
+       "collect_members(client, entity" in mw, "拉成员还在用错的 peer")
+    ck("K10 补扫周期是一天（老板：每天发一次就好）",
+       '"MEMBER_SWEEP_MIN", "1440")' in mw, "不是每天一轮")
+    ck("K10 完成后汇报「读了多少条 + 覆盖到哪天」",
+       "_cover_str" in mw and "读了 {read} 条" in mw, "不报覆盖率，无法发现没读满")
+    ck("K10 没读满时要显式警告",
+       "没读满" in mw, "静默少读")
+    ck("K10 bot.py 补扫提示不再写「只读新消息」",
+       "只读窗口内的新消息" not in src_bot, "文案还是旧的，误导老板")
+
     print()
     print("RESULT pass=%d fail=%d" % (ck.total - len(FAILS), len(FAILS)))
     if FAILS:
