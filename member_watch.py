@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""进群之后一直盯着：新面孔自动进名单，不用人再去点「重拉成员」。
+"""进群之后一直盯着：全部群每轮都「拉成员 + 读近 3 天消息」，不用人再去点。
 
-老板原话：「读取成员进群后一直读取（读取3天内的成员，并且之后新发消息的也读取）」。
-拆成两件事：
-  1) 刚进群：只把最近 N 天（默认 3 天）进群的成员收进名单 —— 在 collector.collect_members
-     里用 join_days 实现（入群时间来自 participant.date，Telegram 本来就带）。
-  2) 之后常驻：对已入表的每个群挂两件事
-     · 实时：谁在这群发了言 / 谁进了群（服务消息里的加人、链接进群、申请进群），当场入名单；
-     · 兜底补扫：容器重启、掉线、TG 没推的漏网消息，按 watch_cursor 记的水位线重读一遍
-       （只读窗口内的，翻过边界就停，不重复翻历史）。
+老板原话（21:45）：「自动补录改为全部群读取3天内的消息，拉取成员，删掉重拉成员逻辑。」
+所以每轮补扫对每个群做两件事：
+  1) 拉一次群成员：只收近 N 天（默认 3 天）进群的（入群时间来自 participant.date）；
+  2) 读近 N 天的消息：发言人也收进名单 —— 成员页被锁、拿不到名单的群就靠这条。
+另外还挂着实时监听：谁发了言 / 谁进了群，当场入名单，不等下一轮。
 
 为什么用「发消息的人」当信号：成员页被群主设成「只显示管理员」时，名单在服务端就拿不到，
 但「这条消息谁发的」是公开的 —— 这是不当管理员也能持续拿到新人的唯一通路。
@@ -45,12 +42,14 @@ JOIN_WINDOW_DAYS = int(os.environ.get("JOIN_WINDOW_DAYS", "3"))
 SWEEP_INTERVAL_MIN = int(os.environ.get("MEMBER_SWEEP_MIN", "20"))
 # 单次补扫最多翻多少条（防大群把请求打爆）
 SWEEP_MSG_LIMIT = int(os.environ.get("MEMBER_SWEEP_LIMIT", "300"))
+# 每轮拉成员的人数上限（同 collector.collect_members 默认量级，只取近 3 天进群的）
+MEMBER_PULL_LIMIT = int(os.environ.get("MEMBER_PULL_LIMIT", "5000"))
 
 _claims = {}          # {gid: title} 要盯的群（来自 groups_info）
 _clients = []         # [(acc_no, client)]
 _seen = set()         # 已处理过的 uid，避免每条消息都写库
 _seeing = set()       # 正在处理中的 uid（并发去重）
-_stats = {"realtime": 0, "sweep": 0, "msgs": 0, "groups": 0,
+_stats = {"realtime": 0, "sweep": 0, "members": 0, "msgs": 0, "groups": 0,
           "last_sweep": 0, "last_err": "", "started_at": 0}
 _task = None
 _HANDLED_TYPES = tuple(t for t in (MessageActionChatAddUser,
@@ -227,12 +226,41 @@ def track_client(client, acc_no=None):
 # =====================================================================
 #  兜底补扫：重启/掉线之后把漏掉的那段历史补上
 # =====================================================================
+async def _pull_members(client, gid, title):
+    """一个群拉一次成员，只收近窗口天内进群的（只追加/合并，绝不清空）。
+
+    拿不到成员列表（非管理员/服务端锁）就返回 -1呌调用方知道只能靠消息通道。
+    这里故意在函数内 import collector：collector 反过来会 import 本模块的 warm_groups，
+    放顶部会变成循环 import。
+    """
+    try:
+        from collector import collect_members
+        res = await collect_members(client, _peer(gid), limit=MEMBER_PULL_LIMIT,
+                                   recent_only_days=0, join_days=JOIN_WINDOW_DAYS,
+                                   via="member_sweep")
+        if not isinstance(res, str) or not res.startswith("✅"):
+            return -1
+        # "✅ 从「xxx」拉取完成：新增有效成员 N 人" 里拿 N，拿不到也不影响主流程
+        import re as _re
+        m = _re.search(r"新增[^\d]{0,8}(\d+)", res) or _re.search(r"入[^\d]{0,6}(\d+)", res)
+        n = int(m.group(1)) if m else 0
+        _stats["members"] = _stats.get("members", 0) + n
+        return n
+    except Exception as e:
+        log.info(f"[补录] 拉成员「{title or gid}」出错(忽略): {type(e).__name__}: {str(e)[:90]}")
+        return -1
+
+
 async def _sweep_one(client, gid, title):
-    """一个群补扫一次：从水位线往后读，只读窗口内的新消息，发言人入名单。"""
-    last = db_watch_cursor(gid)
-    cutoff = _cutoff()
+    """一个群补扫一轮：先拉成员（近3天进群的），再读近 3 天消息收发言人。
+
+    老板 21:45 的口径：不再只从水位线往后读，而是**每轮都读窗口内的全部消息**，
+    因为重启/掉线之后光标可能比 3 天更新，只从光标往后读会漏人。
+    返回新入人数（拉成员 + 读消息）；负数 = 这个群这个账号读不动。
+    """
     added = 0
-    top = last
+    top = db_watch_cursor(gid)
+    cutoff = _cutoff()
     my_id = None
     try:
         me = await client.get_me()
@@ -243,16 +271,20 @@ async def _sweep_one(client, gid, title):
         entity = await client.get_entity(_peer(gid))
     except Exception:
         return -1        # 这个账号不在这个群：换下一个，别记失败
+    # 1) 先拉一次成员（近 3 天进群的）
+    got_m = await _pull_members(client, gid, title)
+    if got_m > 0:
+        added += got_m
+    # 2) 再读近 3 天的消息，发言人入名单
     try:
-        async for msg in client.iter_messages(entity, limit=SWEEP_MSG_LIMIT,
-                                              min_id=last):
+        async for msg in client.iter_messages(entity, limit=SWEEP_MSG_LIMIT):
             d = getattr(msg, "date", None)
             if d is not None and d.tzinfo is None:
                 d = d.replace(tzinfo=timezone.utc)
             if d is not None:
                 top = max(top, int(getattr(msg, "id", 0) or 0))
                 if d < cutoff:
-                    break   # 从新往老翻，翻过窗口边界后面只会更老
+                    break   # 从新往老翻，翻过 3 天边界后面只会更老
             sid = getattr(msg, "sender_id", None)
             if not sid or sid in _seen or sid in _seeing:
                 continue
@@ -272,7 +304,7 @@ async def _sweep_one(client, gid, title):
         _stats["last_err"] = f"{type(e).__name__}: {str(e)[:80]}"
         log.info(f"[补录] 补扫「{title or gid}」出错: {type(e).__name__}: {str(e)[:100]}")
         return -1
-    if top > last:
+    if top > db_watch_cursor(gid):
         try:
             db_watch_set(gid, title, top, new_since_last=added)
         except Exception as e:
@@ -287,7 +319,7 @@ def _peer(gid):
 
 
 async def sweep_once(reason="手动"):
-    """所有盯着的群各补扫一遍（谁在群里就用谁，一个账号读不动就换一个）。"""
+    """全部群各扫一轮（拉成员 + 读近3天消息；谁在群里就用谁，一个号读不动就换一个）。"""
     refresh_groups()
     if not _claims:
         return "表里还没有群记录，先去「加群」或「批量导入」。"
@@ -313,6 +345,7 @@ async def sweep_once(reason="手动"):
         await asyncio.sleep(0.8)     # 别把请求连成一片，护号
     _stats["last_sweep"] = int(time.time())
     await _notify(f"📡 补录{reason}完成：{len(_claims)} 个群，新入 {total_new} 人"
+                  "（已拉成员 + 已读近 3 天消息）"
                   + (("\n" + "\n".join(lines[:12])) if lines else "\n（没有新人）"))
     return f"补扫完成：新增 {total_new} 人"
 
@@ -354,10 +387,12 @@ def status_text():
         rows = db_watch_list()[:8]
     except Exception:
         pass
-    out = ["📡 进群后自动补录：常驻自动，无需设置",
-           f"新人窗口：固定近 {JOIN_WINDOW_DAYS} 天（进群/发言的才算新面孔），不给改",
+    out = ["📡 进群后自动补录：全部群常驻自动，无需设置",
+           f"固定近 {JOIN_WINDOW_DAYS} 天：每轮拉成员（只收这段日期内进群的）"
+           f"+ 读这段日期内的消息（发言人也收）",
            f"盯的群：{len(_claims)} 个 | 在线账号：{len(_clients)} 个",
            f"本轮统计：实时收 {_stats['realtime']} 人 / 补扫收 {_stats['sweep']} 人"
+           f" / 拉成员收 {_stats.get('members', 0)} 人"
            f"（看到 {int(_stats['msgs'])} 条群消息）"]
     lst = time.strftime("%m-%d %H:%M", time.localtime(_stats["last_sweep"])) \
         if _stats["last_sweep"] else "还没跑过"

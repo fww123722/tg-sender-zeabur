@@ -51,7 +51,7 @@ from bot_menu import (
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_inline_kb, dashboard_menu_kb, dashboard_inline_kb, report_menu_kb, reason_menu_kb,
     group_del_kb, profile_menu_kb, group_del_confirm_kb,
-    group_repull_inline_kb, watch_menu_kb, settings_menu_kb,
+    watch_menu_kb, settings_menu_kb,
     watch_menu_text,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
@@ -732,66 +732,19 @@ def register_handlers(bot, accounts):
                              buttons=pending_joins_inline_kb(rows))
             else:
                 await _reply(event, head, buttons=_groups_kb(event))
-        elif action == "regroup_menu":
-            groups = db_get_all_groups()
-            if not groups:
-                await _reply(event,
-                    "ℹ️ 表里还没有已加入的群。先到「📥 群管理 → ➕ 加群」。",
-                    buttons=_groups_kb(event))
-                return
-            await _reply(event,
-                "🔄 点一个群重拉成员（只追加、**不清空**，已存在的自动合并；\n"
-                "    成员页被锁的群会自动改从历史消息采发言人）：\n\n"
-                f"当前共 {len(groups)} 个群（只列本 Bot 加入的，前 30 个）：",
-                buttons=group_repull_inline_kb(groups[:30]))
         elif action == "del_group_menu":
             groups = db_get_all_groups()
             if not groups:
                 await _reply(event, "ℹ️ 表里没有任何群记录。", buttons=_groups_kb(event))
                 return
-            state.setdefault("del_group_map_by", {})[str(cid)] = {
-                str(i): g for i, g in enumerate(groups, 1)}
             await _reply(event,
                 "🗑 点选要删的群（先退群、再删记录）：",
                 buttons=group_del_kb(groups))
-        elif action == "del_confirm":
-            pend = state.get("pending_del_group")
-            if not pend:
-                await _reply(event, "⚠️ 没有待确认的删除，请重新点「🗑 删除群」。", buttons=_groups_kb(event))
-                return
-            gid, title = pend
-            state["pending_del_group"] = None
-            if _no_accounts(event):
-                return
-            if state["busy"]:
-                await _reply(event, _busy_tip(event), buttons=_groups_kb(event))
-                return
-            _set_busy(event.sender_id)
-            try:
-                await _reply(event, f"🚪 正在让账号退出「{title}」…")
-                _ok_n, lines = await leave_group(accounts, gid)
-                deleted = db_delete_group(gid)
-            finally:
-                _clear_busy()
-            remain = db_get_all_groups()
-            state.setdefault("del_group_map_by", {})[str(cid)] = {
-                str(i): gg for i, gg in enumerate(remain, 1)}
-            msg = (f"🗑 删除「{title}」(id={gid}) 完成：\n"
-                   + "\n".join(lines)
-                   + f"\n{'✅ Bot 记录已删除' if deleted else 'ℹ️ Bot 记录本就不存在'}"
-                   + f"\n剩余 {len(remain)} 个群。")
-            if not remain:
-                msg += "\n表已清空，返回群管理。"
-                await _reply(event, msg, buttons=_groups_kb(event))
-            else:
-                await _reply(event, msg, buttons=group_del_kb(remain))
-        elif action == "del_cancel":
-            state["pending_del_group"] = None
-            groups = db_get_all_groups()
-            state.setdefault("del_group_map_by", {})[str(cid)] = {
-                str(i): g for i, g in enumerate(groups, 1)}
-            await _reply(event, "↩️ 已取消删除。",
-                         buttons=group_del_kb(groups) if groups else _groups_kb(event))
+        elif action == "del_confirm" or action == "del_cancel":
+            # 已改走消息内联按钮 gdc:y:<gid> / gdc:n:<gid>（旧底部键盘按到也不会误删）
+            await _reply(event,
+                "ℹ️ 删除群现在要**点消息下面的按钮**：先点「🗑 删除群」选群，再在提示那条消息上确认。",
+                buttons=_groups_kb(event))
         elif action == "acc_list":
             await _acc_list(event, accounts)
         elif action == "acc_filter":
@@ -943,22 +896,13 @@ def register_handlers(bot, accounts):
                          buttons=report_menu_kb())
             return
 
-        # 1.2 删除群按钮 → 二次确认（退群+删记录）
+        # 1.2 旧版底部键盘的删群按钮：现在只提示，真正的删除靠消息内联 gd:/gdc:
         m_del = re.match(r"^🗑 (\d+) ·", text)
         if m_del:
-            g = ((state.get("del_group_map_by") or {}).get(
-                str(event.sender_id)) or {}).get(m_del.group(1))
-            if not g:
-                await _reply(event, "⚠️ 列表已过期，请重新点「🗑 删除群」。", buttons=_groups_kb(event))
-                return
-            gid, title = g[0], g[1] or g[2] or str(g[0])
-            state["pending_del_group"] = (gid, title)
             await _reply(event,
-                f"⚠️ 确认删除群「{title}」(id={gid})？\n\n"
-                "1) 该群内所有账号退群\n"
-                "2) 删除 Bot 群记录\n\n"
-                "退群不可逆，需重新加群才能回来。",
-                buttons=group_del_confirm_kb())
+                "ℹ️ 删群已改成点消息下面的按钮（安全：不靠序号猜群）。\n"
+                "请重新点「🗑 删除群」→ 点要删的那一条 → 在确认消息上按「⚠️ 确认退群并删除」。",
+                buttons=_groups_kb(event))
             return
 
         # 1.3 删除文案已改走内联回调 pl:d:<msg_id>，不再靠按钮文字匹配
@@ -1011,7 +955,7 @@ def register_handlers(bot, accounts):
         lines.append("🔒 系统不自选按钮、不自算答案：每一次提交都得你在消息上点/打字。")
         await _reply(event, "\n".join(lines))
 
-    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 重拉选群） ----------
+    # ---------- 内联键盘回调（消息附带按钮：系统设置 / 删群） ----------
     @bot.on(events.CallbackQuery)
     async def on_callback(event):
         if not is_authorized(event.sender_id):
@@ -1031,8 +975,15 @@ def register_handlers(bot, accounts):
                 await event.answer("不用选群了：直接发文案再点「确认开跑」，"
                                    "默认打所有群的人（从新到旧）", alert=True)
                 return
+            elif data.startswith("gd:"):
+                await _cb_gd(event, data[3:])
+            elif data.startswith("gdc:"):
+                await _cb_gdc(event, data[4:])
             elif data.startswith("gr:"):
-                await _cb_regroup(event, data[3:])
+                # 已废弃：重拉成员删了，补录现在全自动
+                await event.answer("重拉成员已去掉：自动补录会定期拉成员 + 读近 3 天消息，不用人点",
+                                   alert=True)
+                return
             elif data.startswith("pl:"):
                 await _cb_pool(event, data[3:])
             elif data.startswith("vr:"):
@@ -1188,82 +1139,76 @@ def register_handlers(bot, accounts):
             return
         await event.answer()
 
-    async def _cb_regroup(event, arg):
-        """「🔄 重拉成员」内联按钮：gr:<序号> / gr:back"""
+    async def _cb_gd(event, arg):
+        """「🗑 删除群」消息附带键盘：gd:<gid> 选群 / gd:back 返回群管理。
+
+        callback 直接带真实 gid，不再靠按钮文字里的序号猜群（老板 21:45 要内联）。
+        """
         if arg == "back":
             await event.answer()
             await _reply(event, _groups_text(event), buttons=_groups_kb(event))
             return
-        await event.answer("正在重拉成员…")
         try:
-            n = int(arg)
-        except ValueError:
+            gid = int(arg)
+        except (TypeError, ValueError):
+            await event.answer("⚠️ 按钮参数不对", alert=True)
             return
-        await _regroup_pull(event, n)
-
-    async def _regroup_pull(event, pick_no):
-        """已加入的群重新拉成员：不清空只追加，撞锁自动改采发言人。
-
-        和群发的区别：群发已不再选群（直接打全库名单），重拉只是往名单里补人。
-        两边走同一把名单锁，避免把陌生人混进别人正在跑的那一轮。
-        """
-        if _no_accounts(event):
-            return
-        groups = db_get_all_groups()
-        g = {str(i): gg for i, gg in enumerate(groups, 1)}.get(str(pick_no))
+        g = next((gg for gg in db_get_all_groups() if int(gg[0] or 0) == gid), None)
         if not g:
-            await _reply(event, "⚠️ 群列表变了，请重新点「🔄 重拉成员」。",
+            await event.answer("这个群已不在表里", alert=True)
+            await _reply(event, "ℹ️ 这个群已经不在表里了（可能刚被删过）。",
                          buttons=_groups_kb(event))
             return
-        gid, title, username, _mc, _creator = g
-        target = username or str(gid)
-        if state["busy"]:
-            await _reply(event, _busy_tip(event))
-            return
-        uid = event.sender_id
-        ok, holder = claim_list(uid, actor_name(uid), "重拉:" + (title or target))
-        if not ok:
-            await _reply(event,
-                f"🔒 名单正被 {holder.get('name') or '其他人'} 占用"
-                f"（{holder.get('group') or '-'}）。\n"
-                "重拉会把新人追加进同一份名单，会混进对方正在跑的那一轮，所以只能排队。\n"
-                "等对方跑完，或 30 分钟后自动解锁；紧急情况找admin点「🛑 停止任务」。",
-                buttons=_groups_kb(event))
-            return
-        _audit(event, "regroup", f"{title or target}")
-        _set_busy(uid)
+        title = g[1] or g[2] or str(gid)
+        await event.answer()
+        await _reply(event,
+            f"⚠️ 确认删除群「{title}」(id={gid})？\n\n"
+            "1) 该群内所有账号退群\n"
+            "2) 删除 Bot 群记录\n\n"
+            "退群不可逆，需重新加群才能回来。",
+            buttons=group_del_confirm_kb(gid))
+
+    async def _cb_gdc(event, rest):
+        """删群二次确认（消息附带键盘）：y:<gid> 真的退+删 / n:<gid> 取消。"""
+        op, _, raw = rest.partition(":")
         try:
-            base = db_count_targets()
-            await _reply(event,
-                f"🔄 重拉「{title or target}」…\n"
-                f"🧠 没开自动采发言人也能用：撞锁会自己转历史消息通道。")
-            r = None
-            tried = 0
-            best = -1
-            for acc_no, client, _ph in accounts:
-                tried += 1
-                b0 = db_count_targets()
-                rd, jd = _pull_filters()
-                rr = await collect_members_or_speakers(
-                    client, target, recent_only_days=rd, join_days=jd)
-                got = db_count_targets() - b0
-                if r is None or got > best:
-                    r, best = rr, got
-                if rr.startswith("✅"):
-                    break
-            if r is None:
-                r = "❌ 没有可用账号"
-            elif r.startswith("⚠️") and tried > 1:
-                r += f"\n   ↪ 已换过 {tried} 个账号，都没能看全。"
-            net = db_count_targets() - base
-            r += (f"\n\n📊 本次名单净增 {net} 人"
-                  f"（重拉不清空，原有的人保留，同一人自动合并不会重复）。")
-            await _reply(event, r, buttons=_groups_kb(event))
-            # 一个人都没进（不在这个群/链接失效）：不要把名单锁着白白挡别人 30 分钟
-            if net <= 0 and r.startswith("❌"):
-                release_list(uid)
+            gid = int(raw)
+        except (TypeError, ValueError):
+            await event.answer("⚠️ 按钮参数不对", alert=True)
+            return
+        if op != "y":
+            await event.answer("已取消")
+            groups = db_get_all_groups()
+            await _reply(event, "\u21a9\ufe0f 已取消删除。",
+                         buttons=group_del_kb(groups) if groups else _groups_kb(event))
+            return
+        g = next((gg for gg in db_get_all_groups() if int(gg[0] or 0) == gid), None)
+        title = (g[1] or g[2] or str(gid)) if g else str(gid)
+        if _no_accounts(event):
+            return
+        if state["busy"]:
+            await event.answer("有任务在跑", alert=True)
+            await _reply(event, _busy_tip(event), buttons=_groups_kb(event))
+            return
+        _audit(event, "del_group", f"{title}({gid})")
+        _set_busy(event.sender_id)
+        try:
+            await event.answer("正在退群…")
+            await _reply(event, f"🚪 正在让账号退出「{title}」…")
+            _ok_n, lines = await leave_group(accounts, gid)
+            deleted = db_delete_group(gid)
         finally:
             _clear_busy()
+        remain = db_get_all_groups()
+        msg = (f"🗑 删除「{title}」(id={gid}) 完成：\n"
+               + "\n".join(lines)
+               + f"\n{'\u2705 Bot 记录已删除' if deleted else '\u2139\ufe0f Bot 记录本就不存在'}"
+               + f"\n剩余 {len(remain)} 个群。")
+        if not remain:
+            msg += "\n表已清空，返回群管理。"
+            await _reply(event, msg, buttons=_groups_kb(event))
+        else:
+            await _reply(event, msg, buttons=group_del_kb(remain))
 
     # ---------- 入群验证「人在环」中继（系统只搬题，答题的是人） ----------
     async def _cb_verify(event, rest):
@@ -1373,8 +1318,7 @@ def register_handlers(bot, accounts):
                 await _reply(event, await collect_members_or_speakers(used, ent),
                              buttons=_groups_kb(event))
             else:
-                await _reply(event, "✅ 已在群里。要拉名单去「📥 群管理 → 🔄 重拉成员」，"
-                                    "或直接等自动补录。",
+                await _reply(event, "✅ 已在群里。名单不用人点：「📡 自动补录」会定期拉成员 + 读近 3 天消息。",
                              buttons=_groups_kb(event))
         else:
             await _reply(event, "ℹ️ 还没通过。要我把验证题搬过来，点「📨 在途申请」→ 选中该群 → 「📡 继续盯验证消息」。",
@@ -1948,7 +1892,7 @@ def register_handlers(bot, accounts):
             await _reply(event,
                 f"⛔ 名单正被 {holder.get('name') or '其他人'} 占用"
                 f"（{holder.get('group') or '-'}），重新拉人会清掉对方的名单。\n"
-                "请等对方跑完，或到「📥 群管理 → 🔄 重拉成员」里排队。")
+                "请等对方跑完，或到「📥 群管理 → 📡 自动补录」看进度。")
             return
         _audit(event, "auto_addgroup", link[:80])
         await _reply(event, "检测到群链接，正在加入并读取成员…")

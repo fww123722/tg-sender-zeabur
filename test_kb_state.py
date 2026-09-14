@@ -64,6 +64,13 @@ def styles(kb):
     return out
 
 
+def _styled(b):
+    """内联按钮到底有没有被上色（telethon 会给个空 style 对象，所以看三个色标志）。"""
+    st = getattr(b, "style", None)
+    return bool(st) and any(getattr(st, k, False) for k in
+                            ("bg_success", "bg_danger", "bg_primary"))
+
+
 def main():
     # ---------- K1 空闲态：两步（写文案→确认开跑），颜色已全关 ----------
     k0 = M.campaign_menu_kb(stage=0)
@@ -128,19 +135,26 @@ def main():
            plain is not None and flat(plain) == flat(kb)
            and all(v is None for v in styles(plain).values()), flat(plain) if plain else None)
 
-    # ---------- K6 删群（底部键盘）：文字格式必须和 bot.py 正则对上 ----------
-    import re as _re
+    # ---------- K6 删群（消息附带内联键盘，老板 21:45）：callback 带真实 gid ----------
     groups = [(1, "锁名单群A", "ua", 5, 0), (2, None, None, 1, 0)]
     kd = M.group_del_kb(groups)
-    ck("K6 删群项格式 = 🗑 N · 标题", flat(kd)[0].startswith("🗑 1 · "), flat(kd))
-    ck("K6 删群标题去换行限长",
-       "\n" not in flat(kd)[0] and len(flat(kd)[0]) < 40, flat(kd))
+    ck("K6 删群键盘是消息附带内联键盘",
+       isinstance(kd, list) and isinstance(kd[0], list) and not hasattr(kd, "rows"), type(kd))
+    ck("K6 删群 callback 带真实 gid（不再靠序号猜群）",
+       kd[0][0].data == b"gd:1" and kd[0][1].data == b"gd:2", [b.data for r in kd for b in r])
+    ck("K6 删群标题去换行限长且无色",
+       "\n" not in kd[0][0].text and len(kd[0][0].text) < 40
+       and not any(_styled(b) for r in kd for b in r), kd[0][0].text)
+    ck("K6 删群有返回行", kd[-1][0].data == b"gd:back", kd[-1][0].data)
+    kc = M.group_del_confirm_kb(1001)
+    ck("K6 二次确认也是内联，callback 带 gid",
+       kc[0][0].data == b"gdc:y:1001" and kc[1][0].data == b"gdc:n:1001",
+       [b.data for r in kc for b in r])
     src_bot = io.open(os.path.join(HERE, "bot.py"), encoding="utf-8").read()
-    g_re = _re.search(r'm_del = re\.match\(r"(.*?)",', src_bot)
-    ck("K6 bot.py 删群正则仍在", bool(g_re), g_re)
-    if g_re:
-        ck("K6 删群正则匹配得上删群按钮",
-           _re.match(g_re.group(1), flat(kd)[0]) is not None, (g_re.group(1), flat(kd)[0]))
+    ck("K6 bot.py 接上了 gd: / gdc: 两路回调",
+       '"gd:"' in src_bot and '"gdc:"' in src_bot, "删群回调没接")
+    ck("K6 删群不再走底部文字+序号映射表",
+       "del_group_map_by" not in src_bot, "还在用序号映射表（会误删）")
     # 删文案已改内联 callback：靠 msg_id 不靠文字，从根本上不可能误退群
     pd = M.pool_del_kb([("manual", 11, "AAA promo"), ("manual", 12, "BBB")])
     ck("K6 删文案按钮 callback 带真实 msg_id",
@@ -153,8 +167,11 @@ def main():
     # 选群已废弃：group_pick_inline_kb 现在返回空（旧消息上的 gp: 按钮点了只回主菜单）
     gi = M.group_pick_inline_kb(groups)
     ck("K7 内联选群已废弃返回空", gi == [], gi)
-    gr = M.group_repull_inline_kb(groups)
-    ck("K7 重拉 callback 仍是 gr:", gr[0][0].data == b"gr:1", gr[0][0].data)
+    # 重拉成员已整块删除（老板 21:45：补录改为全部群拉成员+读近3天消息）
+    ck("K7 重拉成员键盘已从 bot_menu 删除", not hasattr(M, "group_repull_inline_kb"), "还在")
+    ck("K7 bot_menu 不再有 regroup 按钮/动作",
+       "regroup" not in M.BTN and "regroup_menu" not in list(M.BTN_ACTION.values()),
+       [k for k in M.BTN if "regroup" in k])
     st = M.settings_inline_kb(recent_on=True, repeat_on=False, speed=5, quota=50)
     lab = {b.text: b for row in st for b in row}
     ck("K7 设置内联面板开关行只一套",

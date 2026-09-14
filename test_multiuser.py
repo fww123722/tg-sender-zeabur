@@ -155,6 +155,13 @@ def run_handler(name, event):
     return list(SENT)
 
 
+def run_cb(uid, data):
+    """驱动一个内联（消息附带）按钮的 callback。"""
+    ev = FakeEvent(uid, "")
+    ev.data = data if isinstance(data, bytes) else data.encode()
+    return run_handler("on_callback", ev)
+
+
 def flat_kb(buttons):
     rows = getattr(buttons, "rows", None) or []
     out = []
@@ -275,21 +282,24 @@ def section_c():
     out = run_handler("on_addop", FakeEvent(ALICE))
     check("A /addop still owner-only", H.get("on_addop") is not None and True)
 
-    # 删群三段流程（admin）
-    # 删群流程：现在操作员也能走通
+    # 删群三段流程（现在全是消息附带内联按钮：gd:<gid> → gdc:y:<gid>）
     run_handler("on_any_text", FakeEvent(ALICE, BTN["del_group"]))
-    out = run_handler("on_any_text", FakeEvent(ALICE, "🗑 1 · 群A"))
+    out = run_cb(ALICE, b"gd:1001")
     check("C operator del flow: confirm prompt",
           out and "确认删除群" in out[0])
-    out = run_handler("on_any_text", FakeEvent(ALICE, BTN["del_confirm"]))
+    out = run_cb(ALICE, b"gdc:y:1001")
     check("C operator del flow: executed",
           DELETED == [1001] and "删除" in "\n".join(out))
     DELETED.clear()
 
+    # 旧底部键盘那点文字已经删不了群（只能引导去重新点）
+    run_handler("on_any_text", FakeEvent(ALICE, "🗑 1 · 群A"))
+    check("C legacy text button cannot delete", DELETED == [])
+
     # 未授权的人伪造点击，必须无效
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_group"]))
-    run_handler("on_any_text", FakeEvent(STRANGER, "🗑 1 · 群A"))
-    run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_confirm"]))
+    run_cb(STRANGER, b"gd:1001")
+    run_cb(STRANGER, b"gdc:y:1001")
     check("C stranger cannot delete group", DELETED == [])
 
     # 群发已不再选群：确认没有遗留的选群映射 state（旧逻辑两个人同时选群会互相覆盖列表）

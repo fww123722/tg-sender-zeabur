@@ -31,7 +31,6 @@ BTN = {
     "add_group": "➕ 加群",
     "batch_import": "📥 批量导入",
     "pending_joins": "📨 在途申请",
-    "regroup": "🔄 重拉成员",
     "del_group": "🗑 删除群",
     # 进群后持续补录：老板「读了成员不能就不管了」，这里给状态+手动补扫入口
     "watch": "📡 自动补录",
@@ -103,13 +102,10 @@ BTN_ACTION = {
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
     BTN["pending_joins"]: "pending_joins",
-    BTN["regroup"]: "regroup_menu",
     BTN["del_group"]: "del_group_menu",
     BTN["watch"]: "watch_status",
     BTN["watch_now"]: "watch_now",
     BTN["watch_status"]: "watch_status",
-    BTN["del_confirm"]: "del_confirm",
-    BTN["del_cancel"]: "del_cancel",
     BTN["acc_list"]: "acc_list",
     BTN["acc_add"]: "acc_add_prompt",
     BTN["acc_edit_profile"]: "profile_menu",
@@ -207,7 +203,6 @@ STYLE_BY_ACTION = {
     # 红：不可逆 / 停当前任务
     "stop": "danger",
     "del_group_menu": "danger",
-    "del_confirm": "danger",
     "pool_clear": "danger",
     "watch_now": "primary",
     "watch_status": "primary",
@@ -359,7 +354,7 @@ def groups_menu_kb(is_operator: bool = False):
     """群管理：只看/进/盯/删四件事，三行功能键 + 返回。
 
     减负记录：「批量导入」已并进「加群」（发一条=加一个，发多行=批量），
-    「重拉成员」并到「自动补录」子菜单里——顶层从 7 个入口压到 5 个。
+    「自动补录」已改成全自动（定期拉成员 + 读窗口内消息），所以上一层只留四个入口。
     """
     return _kb([
         (BTN["my_groups"], BTN["add_group"]),
@@ -370,47 +365,39 @@ def groups_menu_kb(is_operator: bool = False):
 
 
 def watch_menu_kb():
-    """成员补录子菜单：自动的事不给开关，只给「立即补扫 / 重拉一个群 / 看情况」。"""
+    """成员补录子菜单：全自动不给开关，只留「立即补扫 / 看情况」。"""
     return _kb([
-        (BTN["watch_now"], BTN["regroup"]),
+        (BTN["watch_now"],),
         (BTN["watch_status"],),
         (BTN["back_groups"],),
-    ], {BTN["watch_now"]: "primary"})
+    ])
 
 
-def group_repull_inline_kb(groups):
-    """重拉成员选群键盘（内联）：gr:<序号>，每行 2 个。groups 同 db_get_all_groups()。"""
+def group_del_kb(groups):
+    """删除群键盘：**消息附带内联键盘**（老板 21:45），callback 直接带真实 gid（gd:<gid>）。
+
+    不再靠按钮文字正则匹配 → 不依赖序号顺序，列表变了也不会误删。
+    """
     rows = []
     cur = []
-    for i, g in enumerate(groups, 1):
-        cur.append(Button.inline(f"{i} · {_clean_title(g)}", f"gr:{i}".encode()))
+    for g in groups:
+        gid = int(g[0] or 0)
+        cur.append(Button.inline(f"🗑 {_clean_title(g, 22)}", f"gd:{gid}".encode()))
         if len(cur) == 2:
             rows.append(cur)
             cur = []
     if cur:
         rows.append(cur)
-    rows.append([Button.inline(BTN["cancel_pick"], b"gr:back")])
+    rows.append([Button.inline(BTN["back_groups"], b"gd:back")])
     return rows
 
 
-def group_del_kb(groups):
-    """删除群键盘：单列「🗑 序号 · 标题」（bot.py 按这个格式匹配，改文字要同步）。"""
-    rows = []
-    styles = {}
-    for i, g in enumerate(groups, 1):
-        t = f"🗑 {i} · {_clean_title(g, 22)}"
-        styles[t] = "danger"
-        rows.append((t,))
-    rows.append((BTN["back_groups"],))
-    return _kb(rows, styles)
-
-
-def group_del_confirm_kb():
-    """删除群二次确认：确认（红）与取消（灰）各占一行。"""
-    return _kb([
-        (BTN["del_confirm"],),
-        (BTN["del_cancel"],),
-    ])
+def group_del_confirm_kb(pending_gid=0):
+    """删除群二次确认（也是消息附带内联键盘）：确认/取消各一行，callback 带 gid。"""
+    return [
+        [Button.inline(BTN["del_confirm"], f"gdc:y:{int(pending_gid or 0)}".encode())],
+        [Button.inline(BTN["del_cancel"], f"gdc:n:{int(pending_gid or 0)}".encode())],
+    ]
 
 
 def accounts_menu_kb():
@@ -570,19 +557,20 @@ def groups_menu_text(is_operator: bool = False):
     return ("📥 群管理\n\n"
             "📋「我的群」— 看账号在哪些群\n"
             "➕「加群」— 发一个链接加一个；一次发多个（一行一个）就是批量导入\n"
-            "📡「自动补录」— 进群后持续收新人，子菜单里有重拉/补扫\n"
+            "📡「自动补录」— 全自动：定期拉成员 + 读近 3 天消息，不用人点\n"
             "📨「在途申请」— 等群主批准 / 等你人工验证的群\n"
             "⚠️「删除群」— 先退群再删记录，不可逆")
 
 
 def watch_menu_text():
-    """成员补录子菜单文本：说清「为什么一直在读」，常驻自动、没得关。"""
-    return ("📡 自动补录｜进群后一直读，不用人再点\n\n"
-            "盯着的群有人发言、有人进群 → 当场进名单；\n"
-            "　　每 20 分钟再按水位线补扫一轮（重启/掉线漏的补回来）。\n"
+    """成员补录子菜单文本：说清它在读什么，常驻自动、没得关。"""
+    return ("📡 自动补录｜全部群一直读，不用人再点\n\n"
+            "干什么：每轮把每个群都过一遍——\n"
+            "　　· 拉一次群成员，只收近 3 天进群的；\n"
+            "　　· 读近 3 天的消息，发言人也收进名单（成员页被锁的群也能拿到人）；\n"
+            "　　· 平时有人发言/进群 → 当场就进名单，不等下一轮。\n"
             "全程只追加不清空，不会动别人正在跑的名单。\n\n"
-            "⚡「立即补扫」— 现在就把所有群过一轮\n"
-            "🔄「重拉成员」— 挑一个群重新拉一次\n\n")
+            "⚡「立即补扫」— 现在就把所有群过一轮\n\n")
 
 
 def accounts_menu_text():
