@@ -328,11 +328,16 @@ async def _watch_now(event):
 async def _push_main_menu(event):
     """发主菜单文本（含数据摘要），回到主键盘。"""
     _apply_settings_to_state()
-    sent = db_sent_global()
+    # 控制面板这一行改显「未发送」（老板 20:07：已发变为未发）；
+    # 取数失败不能挡住主菜单，兜底退回旧的已发口径。
+    try:
+        unsent, _total = db_unsent_stats()
+    except Exception:
+        unsent = db_sent_global()
     b = state.get("busy_by") or {}
     text = main_menu_text(
         ACTIVE_ACCOUNTS, db_group_count(),
-        sent, db_count_pool(), state["busy"],
+        unsent, db_count_pool(), state["busy"],
         role="owner" if is_owner(event.sender_id) else "operator",
         name=actor_name(event.sender_id),
         busy_tip=(actor_name(b.get("uid")) if state["busy"] and b else ""),

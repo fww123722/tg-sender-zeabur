@@ -526,7 +526,7 @@ def reason_menu_kb():
 # =====================================================================
 #  各菜单文本
 # =====================================================================
-def main_menu_text(accounts, groups_count, sent_count, pool_count, busy: bool,
+def main_menu_text(accounts, groups_count, unsent_count, pool_count, busy: bool,
                    role: str = "owner", name: str = "", busy_tip: str = ""):
     """主菜单文本，含实时数据摘要。多人使用时标出当前身份。"""
     # actor_name(owner) 已返回 admin，不拼前缀以免「admin：admin」
@@ -540,7 +540,7 @@ def main_menu_text(accounts, groups_count, sent_count, pool_count, busy: bool,
         head +
         f"👤 账号: {len(accounts)} 个在线 | "
         f"📁 群组: {groups_count} 个 | "
-        f"📨 已发(去重): {sent_count} 人\n"
+        f"📨 未发送: {unsent_count} 人\n"
         f"📝 文案池: {pool_count} 条\n"
         f"{'⏳ 任务中…' if busy else '🟢 空闲中'}{lock}\n\n"
         + ("" if role == "owner"
