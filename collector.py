@@ -231,7 +231,7 @@ async def collect_members(client, peer_arg, limit=5000, recent_only_days=0):
                    f"换个普通成员号重拉照样拿不到。\n"
                    f"   ✔ 要拿全名单只有两条路：该账号在这个群里是管理员；"
                    f"或群主关掉「显示成员」限制。\n"
-                   f"   🗣 不当管理员的退路：用「🗣 采发言人」从历史消息里"
+                   f"   🗣 不当管理员也能补一波：下面会自动改从历史消息里"
                    f"把说过话的人采进名单。\n")
         else:
             head = f"⚠️ 「{name}」的名单拿不全（Telegram 只放行了前面一部分）。"
@@ -372,6 +372,29 @@ async def collect_speakers(client, peer_arg, msg_limit=2000, recent_only_days=0)
     tails.append("   ❗ 这是「活跃发言人」不是全量成员：只说过话的人在里面，"
                  "也只能看到本账号可见的那段历史。")
     return head + "\n" + "\n".join(tails)
+
+
+async def collect_members_or_speakers(client, peer_arg, limit=5000,
+                                      recent_only_days=0, msg_limit=2000):
+    """先按成员列表拉；被服务端挡住时**自动**接力采发言人，不用人再点一次。
+
+    老板原话：「不用点击采发言人，就自动读取」。
+    成员列表权限是服务端锁死的，换号也变不出来；但「谁发过言」是公开的，
+    所以拿不全名单时直接转这条通道，而不是只弹一句提示让人自己琢磨。
+    返回拼接后的文本，开头仍保留 ✅/⚠️/❌ 供调用方判断。
+    """
+    r = await collect_members(client, peer_arg, limit=limit,
+                              recent_only_days=recent_only_days)
+    if not r.startswith("⚠️"):
+        return r
+    before = db_count_targets()
+    r2 = await collect_speakers(client, peer_arg, msg_limit=msg_limit,
+                                recent_only_days=recent_only_days)
+    got = db_count_targets() - before
+    return (r + "\n\n"
+            + f"🗣 名单拿不全就不卡在这：已**自动**改从历史消息采发言人"
+              + (f"（本轮又入 {got} 人）" if got > 0 else "")
+              + "\n" + r2)
 
 
 async def collect_channel_history(client, peer_arg, limit=50):

@@ -31,7 +31,7 @@ from db import (
 from collector import (
     db_count_pool, collect_members, list_my_groups, join_group_by_link,
     join_group_all_accounts, collect_channel_history, diag_groups, leave_group,
-    collect_speakers,
+    collect_speakers, collect_members_or_speakers,
     pending_joins_report,
     db_add_pool_text, db_list_pool, db_del_pool, db_clear_pool, db_pool_texts,
     pending_joins_list, verify_arm_by_tag, join_group_one_account,
@@ -50,6 +50,7 @@ from bot_menu import (
     main_menu_kb, campaign_menu_kb, groups_menu_kb, accounts_menu_kb,
     settings_inline_kb, dashboard_menu_kb, dashboard_inline_kb, report_menu_kb, reason_menu_kb,
     group_pick_inline_kb, group_del_kb, profile_menu_kb, group_del_confirm_kb,
+    group_repull_inline_kb,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
     pool_menu_kb, pool_menu_text, pool_inline_kb,
@@ -644,6 +645,18 @@ def register_handlers(bot, accounts):
                              buttons=pending_joins_inline_kb(rows))
             else:
                 await _reply(event, head, buttons=_groups_kb(event))
+        elif action == "regroup_menu":
+            groups = db_get_all_groups()
+            if not groups:
+                await _reply(event,
+                    "ℹ️ 表里还没有已加入的群。先「加群」或到「🚀 群发运营」选群。",
+                    buttons=_groups_kb(event))
+                return
+            await _reply(event,
+                "🔄 点一个群重拉成员（只追加、**不清空**，已存在的自动合并；\n"
+                "    成员页被锁的群会自动改从历史消息采发言人）：\n\n"
+                f"当前共 {len(groups)} 个群（只列本 Bot 加入的，前 30 个）：",
+                buttons=group_repull_inline_kb(groups[:30]))
         elif action == "del_group_menu":
             groups = db_get_all_groups()
             if not groups:
@@ -924,6 +937,8 @@ def register_handlers(bot, accounts):
                 await _cb_dashboard(event, data[3:])
             elif data.startswith("gp:"):
                 await _cb_grouppick(event, data[3:])
+            elif data.startswith("gr:"):
+                await _cb_regroup(event, data[3:])
             elif data.startswith("pl:"):
                 await _cb_pool(event, data[3:])
             elif data.startswith("vr:"):
@@ -1057,6 +1072,79 @@ def register_handlers(bot, accounts):
             return
         await _campaign_group_chosen(event, accounts, n)
 
+    async def _cb_regroup(event, arg):
+        """「🔄 重拉成员」内联按钮：gr:<序号> / gr:back"""
+        if arg == "back":
+            await event.answer()
+            await _reply(event, _groups_text(event), buttons=_groups_kb(event))
+            return
+        await event.answer("正在重拉成员…")
+        try:
+            n = int(arg)
+        except ValueError:
+            return
+        await _regroup_pull(event, n)
+
+    async def _regroup_pull(event, pick_no):
+        """已加入的群重新拉成员：不清空只追加，撞锁自动改采发言人。
+
+        和「① 选群」的区别：选群是开新任务（先清空名单），重拉是补充现有名单。
+        两边走同一把名单锁，避免把陌生人混进别人正在跑的那一轮。
+        """
+        if _no_accounts(event):
+            return
+        groups = db_get_all_groups()
+        g = {str(i): gg for i, gg in enumerate(groups, 1)}.get(str(pick_no))
+        if not g:
+            await _reply(event, "⚠️ 群列表变了，请重新点「🔄 重拉成员」。",
+                         buttons=_groups_kb(event))
+            return
+        gid, title, username, _mc, _creator = g
+        target = username or str(gid)
+        if state["busy"]:
+            await _reply(event, _busy_tip(event))
+            return
+        uid = event.sender_id
+        ok, holder = claim_list(uid, actor_name(uid), "重拉:" + (title or target))
+        if not ok:
+            await _reply(event,
+                f"🔒 名单正被 {holder.get('name') or '其他人'} 占用"
+                f"（{holder.get('group') or '-'}）。\n"
+                "重拉会把新人追加进同一份名单，会混进对方正在跑的那一轮，所以只能排队。\n"
+                "等对方跑完，或 30 分钟后自动解锁；紧急情况找admin点「🛑 停止任务」。",
+                buttons=_groups_kb(event))
+            return
+        _audit(event, "regroup", f"{title or target}")
+        _set_busy(uid)
+        try:
+            base = db_count_targets()
+            await _reply(event,
+                f"🔄 重拉「{title or target}」…\n"
+                f"🧠 没开自动采发言人也能用：撞锁会自己转历史消息通道。")
+            r = None
+            tried = 0
+            best = -1
+            for acc_no, client, _ph in accounts:
+                tried += 1
+                b0 = db_count_targets()
+                rr = await collect_members_or_speakers(
+                    client, target, recent_only_days=state.get("recent_only_days", 0))
+                got = db_count_targets() - b0
+                if r is None or got > best:
+                    r, best = rr, got
+                if rr.startswith("✅"):
+                    break
+            if r is None:
+                r = "❌ 没有可用账号"
+            elif r.startswith("⚠️") and tried > 1:
+                r += f"\n   ↪ 已换过 {tried} 个账号，都没能看全。"
+            net = db_count_targets() - base
+            r += (f"\n\n📊 本次名单净增 {net} 人"
+                  f"（重拉不清空，原有的人保留，同一人自动合并不会重复）。")
+            await _reply(event, r, buttons=_groups_kb(event))
+        finally:
+            _clear_busy()
+
     # ---------- 入群验证「人在环」中继（系统只搬题，答题的是人） ----------
     async def _cb_verify(event, rest):
         """vr:<iid>:c:<序号> 提交老板选的那个按钮 / vr:<iid>:x 忽略本题。"""
@@ -1162,10 +1250,11 @@ def register_handlers(bot, accounts):
                 verify_relay.forget_arm(tag)
             if ent is not None:
                 await _reply(event, "📊 正在拉取群成员到名单…")
-                await _reply(event, await collect_members(used, ent),
+                await _reply(event, await collect_members_or_speakers(used, ent),
                              buttons=_groups_kb(event))
             else:
-                await _reply(event, "✅ 已在群里。要拉名单去「🚀 群发运营」选群。",
+                await _reply(event, "✅ 已在群里。要拉名单去「📥 群管理 → 🔄 重拉成员」，"
+                                    "或「🚀 群发运营 → ① 选群」。",
                              buttons=_groups_kb(event))
         else:
             await _reply(event, "ℹ️ 还没通过。要我把验证题搬过来，点「📨 在途申请」→ 选中该群 → 「📡 继续盯验证消息」。",
@@ -1449,7 +1538,7 @@ def register_handlers(bot, accounts):
             for acc_no, client, _ph in accounts:
                 tried += 1
                 before = db_count_targets()
-                rr = await collect_members(client, target,
+                rr = await collect_members_or_speakers(client, target,
                                           recent_only_days=state.get("recent_only_days", 0))
                 got = db_count_targets() - before   # 不拆文案里的数字，直接看库里进了多少
                 if r is None or got > best:
@@ -1703,7 +1792,7 @@ def register_handlers(bot, accounts):
             await _reply(event, "正在读取群成员到名单…")
             # 用加群返回的实体拉人：邀请链接是一次性凭证，拿原链接再解会报 expired
             target = ent if ent is not None else text
-            r2 = await collect_members(used or accounts[0][1], target)
+            r2 = await collect_members_or_speakers(used or accounts[0][1], target)
             await _reply(event, r2, buttons=_groups_kb(event))
         finally:
             _clear_busy()
@@ -1785,7 +1874,7 @@ def register_handlers(bot, accounts):
                     await _reply(event, f"[{i}/{len(links)}] {link}\n{r1}\n⏭ 未进群，跳过拉名单")
                     continue
                 try:
-                    r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
+                    r2 = await collect_members_or_speakers(used or accounts[0][1], ent if ent is not None else link,
                                            recent_only_days=state.get("recent_only_days", 0))
                 except Exception:
                     r2 = "拉人失败"
@@ -1823,7 +1912,7 @@ def register_handlers(bot, accounts):
                         "🔒 需你本人在官方客户端过一次验证，之后发回同一链接即可。",
                         buttons=_main_kb(event))
                 return
-            r2 = await collect_members(used or accounts[0][1], ent if ent is not None else link,
+            r2 = await collect_members_or_speakers(used or accounts[0][1], ent if ent is not None else link,
                                      recent_only_days=state.get("recent_only_days", 0))
             await _reply(event, r2, buttons=_main_kb(event))
         finally:

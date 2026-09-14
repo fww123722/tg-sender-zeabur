@@ -31,6 +31,7 @@ BTN = {
     "add_group": "加群",
     "batch_import": "批量导入",
     "pending_joins": "📨 在途申请",
+    "regroup": "🔄 重拉成员",
     "del_group": "🗑 删除群",
     "del_confirm": "⚠️ 确认退群并删除",
     "del_cancel": "↩️ 取消",
@@ -93,6 +94,7 @@ BTN_ACTION = {
     BTN["add_group"]: "add_group_prompt",
     BTN["batch_import"]: "batch_import_prompt",
     BTN["pending_joins"]: "pending_joins",
+    BTN["regroup"]: "regroup_menu",
     BTN["del_group"]: "del_group_menu",
     BTN["del_confirm"]: "del_confirm",
     BTN["del_cancel"]: "del_cancel",
@@ -264,14 +266,31 @@ def groups_menu_kb(is_operator: bool = False):
         return _kb([
             (BTN["my_groups"], BTN["add_group"]),
             (BTN["batch_import"], BTN["pending_joins"]),
+            (BTN["regroup"],),
             (BTN["back"],),
         ])
     return _kb([
         (BTN["my_groups"], BTN["add_group"]),
         (BTN["batch_import"], BTN["del_group"]),
-        (BTN["pending_joins"],),
+        (BTN["pending_joins"], BTN["regroup"]),
         (BTN["back"],),
     ])
+
+
+def group_repull_inline_kb(groups):
+    """重拉成员选群键盘（内联）：gr:<序号>，每行 2 个。groups 同 db_get_all_groups()。"""
+    rows = []
+    cur = []
+    for i, g in enumerate(groups, 1):
+        title = (g[1] or g[2] or str(g[0]))[:20]
+        cur.append(Button.inline(f"🔄 {i}·{title}", f"gr:{i}".encode()))
+        if len(cur) == 2:
+            rows.append(cur)
+            cur = []
+    if cur:
+        rows.append(cur)
+    rows.append([Button.inline(BTN["back_groups"], b"gr:back")])
+    return rows
 
 
 def group_del_kb(groups):
@@ -414,14 +433,15 @@ def campaign_menu_text():
         "① 选群 — 选群并自动拉成员\n"
         "② 写文案 — 直接发文案（支持 HTML）\n"
         "③ 确认开跑 — 自动检查账号后开跑\n\n"
-        "🗣「采发言人」：群把成员页锁成只显示管理员时用的——改成翻历史消息，"
-        "把说过话的人采进名单（只追加不清空）。\n\n"
+        "🗣「采发言人」已不用手点：选群/加群/重拉撞到锁名单时会自动改翻历史消息采发言人。\n\n"
         "进度只在一条消息上更新；可暂停/继续/停止。"
     )
 
 
 def groups_menu_text(is_operator: bool = False):
     return ("📥 群管理\n\n查看已加入的群、加群、批量导入、删除群记录。\n"
+            "🔄「重拉成员」：已加入的群随时重拉，只追加不清空；"
+            "成员页被锁的群会自动改采历史发言人。\n"
             "📨「在途申请」= 等群主批准 / 等你人工验证的群，批准后发回同一链接即可。\n"
             "⚠️「删除群」会让账号先退群再删记录，不可逆。")
 

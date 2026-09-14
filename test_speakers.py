@@ -79,14 +79,16 @@ class Msg:
 
 
 class FakeClient:
-    """喂 collect_speakers 需要的接口：iter_messages / get_entity / 成员统计。"""
+    """喂 collect_speakers / collect_members 需要的接口。"""
 
     def __init__(self, phone="300", msgs=None, total=None,
                  flood_after=None, flood_secs=90,
-                 upgrade_map=None, upgrade_exc=None, resolve_exc=None):
+                 upgrade_map=None, upgrade_exc=None, resolve_exc=None,
+                 participants=None):
         self.phone = phone
         self.msgs = msgs or []
         self.total = total
+        self.participants = participants if participants is not None else []
         self.flood_after = flood_after   # 读到第 N 条时抛 FloodWait
         self.flood_secs = flood_secs
         self.upgrade_map = upgrade_map or {}     # PeerUser id -> User
@@ -94,6 +96,10 @@ class FakeClient:
         self.resolve_exc = resolve_exc
         self.channel = chan()
         self.calls = {"GetFullChannelRequest": 0, "get_entity": 0}
+
+    async def iter_participants(self, entity, limit=None):
+        for u in self.participants[:limit] if limit else self.participants:
+            yield u
 
     async def get_me(self):
         return User(id=1, username="me", first_name="me",
@@ -242,6 +248,34 @@ async def main():
     r9 = await C.collect_speakers(m9, "sp8001")
     ck("S9 无历史也如实报", r9.startswith("✅") and "0 个不同发言人" in r9, r9[:200])
     ck("S9 提醒只采到活跃者", "活跃发言人" in r9, r9[:300])
+
+    # ---------- S10 撞锁自动接力采发言人（不用人再点） ----------
+    TARGETS = []
+    m10 = FakeClient("310", total=5000, msgs=msgs([
+        (91, user(91, "spk1")), (92, user(92, "spk2")),
+    ]))
+    # 成员列表只下发 3 个管理员 -> collect_members 会判 ⚠️
+    m10.participants = [user(1001, "adm1"), user(1002, "adm2"), user(1003, "adm3")]
+    r10 = await C.collect_members_or_speakers(m10, "sp8001")
+    ck("S10 自动接力：开头仍 ⚠️", r10.startswith("⚠️"), r10[:120])
+    ck("S10 文案写明自动采", "自动" in r10 and "采发言人" in r10, r10[-400:])
+    ck("S10 发言人已自动入表",
+       {t[0] for t in TARGETS} >= {"91", "92"}, TARGETS)
+    ck("S10 管理员也已入表", {"1001", "1002", "1003"} <= {t[0] for t in TARGETS}, TARGETS)
+
+    # ---------- S11 拿全（✅）时不多跑一次历史 ----------
+    TARGETS = []
+    m11 = FakeClient("311", total=2, msgs=[])
+    m11.participants = [user(121, "ok1"), user(122, "ok2")]
+    r11 = await C.collect_members_or_speakers(m11, "sp8001")
+    ck("S11 ✅ 不接力", r11.startswith("✅") and "自动" not in r11, r11[:200])
+    ck("S11 只入了成员", len(TARGETS) == 2, TARGETS)
+
+    # ---------- S12 ❌（不在群）也不接力 ----------
+    m12 = FakeClient("312", resolve_exc=ValueError("no entity"))
+    m12.channel = None
+    r12 = await C.collect_members_or_speakers(m12, "nope")
+    ck("S12 ❌ 不接力", r12.startswith("❌") and "自动" not in r12, r12[:200])
 
     print()
     print("RESULT pass=%d fail=%d" % (ck.total - len(FAILS), len(FAILS)))
