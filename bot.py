@@ -38,6 +38,7 @@ from collector import (
     pending_joins_list, verify_arm_by_tag, join_group_one_account,
 )
 from sender import send_to_list_multi, broadcast_to_groups, forward_from_channel
+import joinacc
 from profile import edit_all_profiles
 from filter import check_login_accounts
 from accounts import _login_accounts, _add_account_interactive
@@ -1585,7 +1586,9 @@ def register_handlers(bot, accounts):
         if not accounts:
             await _reply(event, "⚠️ 没有在线账号。请点「添加账号」。", buttons=accounts_menu_kb())
             return
-        lines = [f"👥 在线账号 {len(accounts)} 个："]
+        jo = joinacc.get_join_acc()
+        lines = [f"👥 在线 {len(accounts)} 个｜🔑加群号: 账号{jo}" if jo is not None
+                 else f"👥 在线账号 {len(accounts)} 个："]
         for acc_no, client, phone in accounts:
             try:
                 await client.connect()
@@ -1593,15 +1596,13 @@ def register_handlers(bot, accounts):
                 name = me.first_name or f"账号{acc_no}"
                 try:
                     await client.get_dialogs(limit=1)
-                    st = "✅ 可用"
+                    st = "✅ 可用" if acc_no != jo else "🔑 只加群"
                 except Exception:
                     st = "⏳ 受限"
                 ph = phone or (me.phone or "")
                 lines.append(f"• [{acc_no}] {name} ({ph}) {st}")
             except Exception as e:
                 lines.append(f"• [账号{acc_no}] 冻结（{str(e)[:40]}）")
-        lines.append("—")
-        lines.append("如需改昵称/头像/简介，点「批量改资料」养号。")
         await _reply(event, "\n".join(lines), buttons=accounts_menu_kb())
 
     async def _check_accounts_ready(event, accounts):
@@ -1675,9 +1676,10 @@ def register_handlers(bot, accounts):
     async def _run_and_finish(event, accounts, text, targets, sent_before=0, pool=None):
         uid = event.sender_id
         crashed = None
+        npool = len(joinacc.send_pool(accounts))
         # 全程只维护这一条消息：开跑→进度→暂停→汇总全部原地改，控制按钮就挂在它上面
         msg = await _reply(event,
-            f"🚀 群发中 · {len(accounts)} 号 · 名单 {len(targets)} 人",
+            f"🚀 群发中 · {npool} 号 · 名单 {len(targets)} 人",
             buttons=campaign_ctl_kb("run"))
         state["live"] = {"text": (msg.message if msg else "") or "",
                          "at": int(time.time()), "msg": msg}
@@ -1812,7 +1814,7 @@ def register_handlers(bot, accounts):
         await _reply(event, f"🔄 正在加入 {text} …")
         _set_busy(event.sender_id)
         try:
-            r, ent, used = await join_group_all_accounts(accounts, text)
+            r, ent, used = await join_group_all_accounts(await joinacc.pick_for_join(accounts), text)
             await _reply(event, r)
             if not r.startswith("✅"):
                 if r.startswith("⏳"):
@@ -1904,7 +1906,7 @@ def register_handlers(bot, accounts):
                     continue
                 link = m.group(0)
                 try:
-                    r1, ent, used = await join_group_all_accounts(accounts, link)
+                    r1, ent, used = await join_group_all_accounts(await joinacc.pick_for_join(accounts), link)
                 except Exception:
                     r1, ent, used = "加群失败", None, None
                 # 没真正进群（⏳等批准 / 🔒需验证 / ❌失败）时绝不往下拉人：
@@ -1939,7 +1941,7 @@ def register_handlers(bot, accounts):
         await _reply(event, "检测到群链接，正在加入并读取成员…")
         _set_busy(uid)
         try:
-            r, ent, used = await join_group_all_accounts(accounts, link)
+            r, ent, used = await join_group_all_accounts(await joinacc.pick_for_join(accounts), link)
             await _reply(event, r)
             if not str(r).startswith("✅"):
                 # 同上：未进群不去拉名单，避免报出「找不到该群」这种误导性错误

@@ -16,6 +16,7 @@ from health import start_health_server
 from accounts import _find_session, _register_zip_receiver
 from bot import register_handlers
 import member_watch
+import joinacc
 
 
 async def load_accounts(bot, notify=None, quiet_ok=True):
@@ -169,6 +170,12 @@ async def main():
     except Exception as e:
         log.error(f"📡 自动补录启动失败（不影响群发主流程）: {type(e).__name__}: {e}")
 
+    # 加群号：自动选定「在群最多」的号专职加群（不参与群发），并补加它缺的公开群
+    try:
+        asyncio.ensure_future(joinacc.boot(ACTIVE_ACCOUNTS, bot=bot, owner=OWNER_ID))
+    except Exception as e:
+        log.error(f"🔑 加群号初始化失败（不影响主流程）: {type(e).__name__}: {e}")
+
     # ---- 运行时热替换：监听新 zip 到达，断开旧客户端、重新加载 ----
     async def hot_reload_watcher():
         while True:
@@ -223,6 +230,11 @@ async def main():
                     member_watch.restart(new_accounts, bot=bot, owner=OWNER_ID)
                 except Exception as e:
                     log.error(f"📡 热替换后重挂监听失败: {type(e).__name__}: {e}")
+                # 加群号可能随老号一起没了：重新认定 + 补缺口群
+                try:
+                    asyncio.ensure_future(joinacc.boot(new_accounts, bot=bot, owner=OWNER_ID))
+                except Exception as e:
+                    log.error(f"🔑 热替换后加群号重选失败: {type(e).__name__}: {e}")
                 log.info(msg)
                 try:
                     await bot.send_message(get_notify(), msg)

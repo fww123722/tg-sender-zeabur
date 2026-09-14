@@ -221,6 +221,13 @@ async def send_to_list_multi(accounts, targets, text, owner_entity, file=None, i
     # targets: {uid: {"username": ..., "access_hash": ...}}
     ctl_kb = ctl_kb if callable(ctl_kb) else None
 
+    # 加群号只加群、不发货（老板 09-15）；只剩它一个时不剔，宁可它发也别罢工
+    try:
+        from joinacc import send_pool
+        accounts = send_pool(accounts)
+    except Exception as e:
+        log.warning(f"读加群号失败，按全量号发: {type(e).__name__}: {e}")
+
     def _kb_now():
         """进度的键盘：带了控制键盘就跟着状态切，没带则保留原样（不清空）。"""
         if ctl_kb is None:

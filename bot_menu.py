@@ -534,85 +534,63 @@ def reason_menu_kb():
 # =====================================================================
 def main_menu_text(accounts, groups_count, unsent_count, pool_count, busy: bool,
                    role: str = "owner", name: str = "", busy_tip: str = ""):
-    """主菜单文本，含实时数据摘要。多人使用时标出当前身份。"""
-    # actor_name(owner) 已返回 admin，不拼前缀以免「admin：admin」
+    """主菜单：一行身份，一行状态+数据。"""
     if role == "owner":
         tag = name or "admin"
     else:
         tag = ("操作员：" + name) if name else "操作员"
     lock = f"｜占用：{busy_tip}" if busy and busy_tip else ""
     return (
-        f"📋 控制面板｜{tag}\n"
-        f"👤 {len(accounts)} 号 | 📁 {groups_count} 群 | 📨 未发 {unsent_count} | "
-        f"📝 池 {pool_count}\n"
-        f"{'⏳ 任务中…' if busy else '🟢 空闲'}{lock}"
-        + ("" if role == "owner"
-           else "\nℹ️ 操作员功能全开，仅增删操作员需找admin。")
+        f"\U0001f4cb 控制面板\uff5c{tag}\n"
+        f"{'\u23f3 任务中' if busy else '\U0001f7e2 空闲'}{lock}"
+        f"\uff5c\U0001f464{len(accounts)} \U0001f4c1{groups_count} "
+        f"\U0001f4e8未发{unsent_count} \U0001f4dd池{pool_count}"
+        + ("" if role == "owner" else "\n\u2139\ufe0f 增删操作员需找admin。")
     )
 
 
 def campaign_menu_text():
-    """群发运营菜单文本（不选群版：就两步，一句话说完）。"""
-    return ("🚀 群发运营｜两步：① 写文案 → ② 确认开跑\n"
-            "不用选群：默认打所有群的人（新面孔先发），发过的自动跳过。\n"
-            "开跑后只有一条进度消息，暂停/取消就挂在那条消息上。")
+    """群发运营：两步说完。"""
+    return ("\U0001f680 群发运营\uff5c\u2460 写文案 \u2192 \u2461 \u786e\u8ba4\u5f00\u8dd1\n"
+            "\u9ed8\u8ba4\u6253\u6240\u6709\u7fa4\u7684\u4eba\uff08\u65b0\u7684\u5148\u53d1\uff09\uff0c\u53d1\u8fc7\u7684\u81ea\u52a8\u8df3\u8fc7\u3002")
 
 
 def groups_menu_text(is_operator: bool = False):
-    return ("📥 群管理\n\n"
-            "📋「我的群」— 看账号在哪些群\n"
-            "➕「加群」— 发一个链接加一个；一次发多个（一行一个）就是批量导入\n"
-            "📡「自动补录」— 全自动：定期拉成员 + 读近 3 天消息，不用人点\n"
-            "📨「在途申请」— 等群主批准 / 等你人工验证的群\n"
-            "⚠️「删除群」— 先退群再删记录，不可逆")
+    return ("\U0001f4e5 \u7fa4\u7ba1\u7406\n"
+            "\u2795 \u52a0\u7fa4 \u2014 \u53d1\u94fe\u63a5\u52a0\u7fa4\uff0c\u591a\u884c=\u6279\u91cf\u5bfc\u5165\n"
+            "\U0001f4e1 \u8865\u5f55\u5168\u81ea\u52a8 \u00b7 \U0001f4e8 \u5728\u9014=\u7b49\u6279\u51c6/\u9a8c\u8bc1\n"
+            "\U0001f5d1 \u5220\u7fa4 \u2014 \u5148\u9000\u7fa4\u518d\u5220\u8bb0\u5f55\uff0c\u4e0d\u53ef\u9006")
 
 
 def watch_menu_text():
-    """成员补录子菜单文本：说清它在读什么，常驻自动、没得关。"""
-    return ("📡 自动补录｜全部群一直读，不用人再点\n\n"
-            "干什么：每轮把每个群都过一遍——\n"
-            "　　· 拉一次群成员，只收近 3 天进群的；\n"
-            "　　· 读近 3 天的消息，发言人也收进名单（成员页被锁的群也能拿到人）；\n"
-            "　　· 平时有人发言/进群 → 当场就进名单，不等下一轮。\n"
-            "全程只追加不清空，不会动别人正在跑的名单。\n\n"
-            "⚡「立即补扫」— 现在就把所有群过一轮\n\n")
+    """成员补录子菜单：常驻自动、没得关。"""
+    return ("\U0001f4e1 \u81ea\u52a8\u8865\u5f55\uff5c\u5e38\u9a7b\u81ea\u52a8\uff0c\u4e0d\u7528\u4eba\u70b9\n"
+            "\u6bcf\u8f6e\uff1a\u62c9\u7fa4\u6210\u5458\uff08\u8fd1 3 \u5929\u8fdb\u7fa4\u7684\uff09+ \u8bfb\u8fd1 3 \u5929\u6d88\u606f\u6536\u53d1\u8a00\u4eba\n"
+            "\u5e73\u65f6\u53d1\u8a00/\u8fdb\u7fa4\u5f53\u573a\u5165\u540d\u5355\uff0c\u53ea\u8ffd\u52a0\u4e0d\u6e05\u7a7a\u3002")
 
 
 def accounts_menu_text():
-    return ("👥 账号管理\n\n查看账号、添加账号、批量改资料、账号过滤。\n"
-            "🧊「重置冷却」清空限流记账，冷却中的账号立即恢复派活。")
+    return ("👥 账号管理｜列表 / 添加 / 改资料 / 过滤 / 重置冷却\n"
+            "🔑 加群号自动定（在群最多的那个号）：只加群、不参与群发\n"
+            "🧊 重置冷却 = 清限流记账，冷却中的号立刻恢复派活")
 
 
 def profile_menu_text():
-    return (
-        "📝 批量改资料\n\n"
-        "🎲 随机小名 — 随机「小+水果/蔬菜」名，补用户名；无头像的补随机风景照\n"
-        "✏️ 统一名字 — 所有账号改成同一个名字\n\n"
-        "⚠️ 每个账号间隔 2 秒防风控。"
-    )
+    return ("\U0001f4dd \u6279\u91cf\u6539\u8d44\u6599\n"
+            "\U0001f3b2 \u968f\u673a\u5c0f\u540d\uff08\u8865\u7528\u6237\u540d+\u968f\u673a\u5934\u50cf\uff09\u00b7 \u270f\ufe0f \u7edf\u4e00\u540d\u5b57\n"
+            "\u6bcf\u53f7\u9694 2 \u79d2\u9632\u98ce\u63a7\u3002")
 
 
 def settings_menu_text(recent_on=None, repeat_on=None):
-    lines = ["⚙️ 系统设置", "",
-             "• 发送间隔 / 每日上限 — 点进去输数字",
-             "• 文本模式 — 点击切换 纯文本 → HTML → Markdown"]
-    if recent_on is not None:
-        lines.append(f"• 近7天活跃 — {'✅ 开' if recent_on else '❌ 关'}")
-    if repeat_on is not None:
-        lines.append(f"• 重复推广 — {'✅ 开（同一人可再推）' if repeat_on else '❌ 关（每人只推一次）'}")
-    lines += ["", "当前值都标在下面按钮上，改完自动生效（底部不再重复摆开关）。"]
-    return "\n".join(lines)
+    """设置页：当前值已标在按钮上，不再重复念开关。"""
+    return ("\u2699\ufe0f 系统设置\uff5c\u70b9\u6309\u94ae\u8f93\u6570\u5b57\uff0c\u5f53\u524d\u503c\u5c31\u6807\u5728\u952e\u4e0a\uff0c\u6539\u5b8c\u5373\u751f\u6548\n"
+            "\u00b6 文\u672c\u6a21\u5f0f\uff1a\u70b9\u4e00\u4e0b\u5207 \u7eaf\u6587\u672c \u2192 HTML \u2192 Markdown")
 
 
 def pool_menu_text(count=0, random_on=False):
-    """文案池菜单文本（三件事版）。random_on 参数仅为旧调用兼容，不再上菜单。"""
-    return (
-        "📚 文案池｜%d 条\n\n"
-        "➕ 新建文案 — 发一条存一条\n"
-        "📋 已有文案 — 列出池里的文案\n"
-        "🗑 删除文案 — 点一条删一条"
-        % count
-    )
+    """文案池菜单文本（一行版）。random_on 仅为旧调用兼容。"""
+    return ("\U0001f4da 文\u6848\u6c60\uff5c%d 条\n"
+            "\u2795 新\u5efa\uff08发一条存一条\uff09\u00b7 \U0001f4cb 已有 \u00b7 \U0001f5d1 删除" % count)
 
 
 def verify_relay_kb(iid, it=None):
