@@ -57,10 +57,11 @@ BTN = {
     "set_parsemode": "¶ 文本模式",
     "set_recent": "🕒 近7天活跃",
     "set_repeat": "🔁 重复推广",
-    # ---- 文案池 ----
+# ---- 文案池（老板 20:27：只要 新建/已有/删除，全部走消息键盘）----
     "pool": "📚 文案池",
-    "pool_add": "➕ 加文案",
-    "pool_list": "📋 看文案",
+    "pool_add": "➕ 新建文案",
+    "pool_list": "📋 已有文案",
+    "pool_del": "🗑 删除文案",
     "pool_clear": "🗑 清空",
     "pool_random": "🔀 随机轮换",
     # ---- 任务控制 ----
@@ -126,6 +127,7 @@ BTN_ACTION = {
     BTN["pool"]: "menu_pool",
     BTN["pool_add"]: "pool_add_prompt",
     BTN["pool_list"]: "pool_list",
+    BTN["pool_del"]: "pool_del_menu",
     BTN["pool_clear"]: "pool_clear",
     BTN["pool_random"]: "pool_random",
     BTN["pause"]: "pause",
@@ -170,7 +172,7 @@ INPUT_HINTS = {
     "set_quota_prompt": "请输入每账号每日上限条数（例如 50）：",
     "set_parallel_prompt": "请输入并行发送的账号数（例如 3）：",
     "camp_step3": "请输入要群发的文案内容（可多行文字）：",
-    "pool_add_prompt": "请发送要存入文案池的内容（一次一条）：",
+    "pool_add_prompt": "请发送要新建的文案内容（一次一条，存进文案池）：",
     "rep_user_prompt": "请发送要举报的用户/频道（@username 或 t.me/xxx）：",
     "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
     "camp_speakers_prompt": (
@@ -216,7 +218,9 @@ _STYLE_ATTR = {"success": "bg_success", "danger": "bg_danger", "primary": "bg_pr
 _STYLE_CACHE = {}
 
 # 万一服务端不认这个新字段，关掉它就退回纯文字键盘（不会断发消息）
-IOS_STYLE = True
+# 老板 20:27「把键盘颜色改回去」：颜色方案（iOS 语义色）全部下线，
+# 这里关死；下面即使有人传了 styles 也不会生效，回到默认灰键盘。
+IOS_STYLE = False
 
 
 def _ios_style(name):
@@ -334,22 +338,18 @@ def settings_inline_kb(recent_on=False, repeat_on=False, parse_label="纯文本"
     q = f"🎯 每日上限　{quota}" if quota else "🎯 每日上限"
     return [
         _row(Button.inline(sp, b"st:speed:show")),
-        _row(Button.inline("−1", b"st:speed:-1", style="primary"),
-             Button.inline("＋1", b"st:speed:+1", style="primary"),
-             Button.inline("＋5", b"st:speed:+5", style="primary"),
-             Button.inline("＋10", b"st:speed:+10", style="primary")),
+        _row(Button.inline("−1", b"st:speed:-1"),
+             Button.inline("＋1", b"st:speed:+1"),
+             Button.inline("＋5", b"st:speed:+5"),
+             Button.inline("＋10", b"st:speed:+10")),
         _row(Button.inline(q, b"st:quota:show")),
-        _row(Button.inline("−10", b"st:quota:-10", style="primary"),
-             Button.inline("＋10", b"st:quota:+10", style="primary"),
-             Button.inline("＋50", b"st:quota:+50", style="primary"),
-             Button.inline("＋100", b"st:quota:+100", style="primary")),
-        _row(Button.inline(f"¶ 文本模式　{parse_label}", b"st:parse", style="primary")),
-        _row(Button.inline(f"🕒 近7天活跃　{_sw(recent_on)}", b"st:recent",
-                           style="success" if recent_on else None),
-             Button.inline(f"🔁 重复推广　{_sw(repeat_on)}", b"st:repeat",
-                           style="success" if repeat_on else None)),
-        _row(Button.inline(f"🔁 重复推广　{_sw(repeat_on)}", b"st:repeat",
-                           style="success" if repeat_on else None)),
+        _row(Button.inline("−10", b"st:quota:-10"),
+             Button.inline("＋10", b"st:quota:+10"),
+             Button.inline("＋50", b"st:quota:+50"),
+             Button.inline("＋100", b"st:quota:+100")),
+        _row(Button.inline(f"¶ 文本模式　{parse_label}", b"st:parse")),
+        _row(Button.inline(f"🕒 近7天活跃　{_sw(recent_on)}", b"st:recent"),
+             Button.inline(f"🔁 重复推广　{_sw(repeat_on)}", b"st:repeat")),
         _row(Button.inline(BTN["back"], b"st:home")),
     ]
 
@@ -382,8 +382,7 @@ def group_repull_inline_kb(groups):
     rows = []
     cur = []
     for i, g in enumerate(groups, 1):
-        cur.append(Button.inline(f"{i} · {_clean_title(g)}", f"gr:{i}".encode(),
-                                style="primary"))
+        cur.append(Button.inline(f"{i} · {_clean_title(g)}", f"gr:{i}".encode()))
         if len(cur) == 2:
             rows.append(cur)
             cur = []
@@ -394,11 +393,11 @@ def group_repull_inline_kb(groups):
 
 
 def group_del_kb(groups):
-    """删除群键盘：单列序号·标题（全标红：这一排按下去都是不可逆的）。"""
+    """删除群键盘：单列「🗑 序号 · 标题」（bot.py 按这个格式匹配，改文字要同步）。"""
     rows = []
     styles = {}
     for i, g in enumerate(groups, 1):
-        t = f"{i} · {_clean_title(g, 22)}"
+        t = f"🗑 {i} · {_clean_title(g, 22)}"
         styles[t] = "danger"
         rows.append((t,))
     rows.append((BTN["back_groups"],))
@@ -456,21 +455,31 @@ def settings_speed_quota_kb(speed=None, quota=None):
 
 
 def pool_menu_kb():
-    """文案池菜单：加/看 一行，轮换/清空 一行，返回单独。"""
+    """文案池菜单（老板 20:27：就三件事）：新建 / 已有 / 删除，全走消息键盘。"""
     return _kb([
         (BTN["pool_add"], BTN["pool_list"]),
-        (BTN["pool_random"], BTN["pool_clear"]),
+        (BTN["pool_del"],),
         (BTN["back_settings"],),
     ])
 
 
+def pool_del_kb(items):
+    """删除文案（消息键盘）：每条一个「🗑 文案 N · 开头」，和删群的「🗑 N ·」不撞。
+    items: [(source, msg_id, text), ...]，按传入顺序编号。"""
+    rows = []
+    for i, (_src, _mid, t) in enumerate(items, 1):
+        head = " ".join(str(t or "").split())[:16] or "（空）"
+        rows.append((f"🗑 文案 {i} · {head}",))
+    rows.append((BTN["back_settings"],))
+    return _kb(rows)
+
+
 def pool_inline_kb(rows):
-    """文案列表内联键盘：每条一个删除按钮 pl:<id>（全红），底部清空/返回。"""
+    """（已废弃：删除文案改走消息键盘）旧消息上挂着 pl: 按钮的兼容入口。"""
     btns = []
     for i, (source, msg_id, _text) in enumerate(rows, 1):
-        btns.append([Button.inline(f"删 第{i}条", ("pl:d:%d" % msg_id).encode(),
-                                   style="danger")])
-    btns.append([Button.inline("🗑 全部清空", b"pl:clear", style="danger"),
+        btns.append([Button.inline(f"删 第{i}条", ("pl:d:%d" % msg_id).encode())])
+    btns.append([Button.inline("🗑 全部清空", b"pl:clear"),
                  Button.inline(BTN["cancel_pick"], b"pl:back")])
     return btns
 
@@ -491,14 +500,13 @@ def dashboard_inline_kb(show_accounts=False):
     """
     cur = "un" if show_accounts == "unsent" else ("acc" if show_accounts else "who")
 
-    def _b(label, key, style=None):
+    def _b(label, key):
         mark = "▸ " if cur == key else "　 "
-        st = style or ("primary" if cur == key else None)
-        return Button.inline(mark + label, f"db:{key}".encode(), style=st)
+        return Button.inline(mark + label, f"db:{key}".encode())
 
     return [
         _row(_b("👤 每人统计", "who")),
-        _row(_b("❗ 未发送", "un", "danger")),
+        _row(_b("❗ 未发送", "un")),
         _row(_b("📇 账号明细", "acc")),
         _row(Button.inline(BTN["refresh"], b"db:ref"),
              Button.inline(BTN["back"], b"db:home")),
@@ -606,14 +614,13 @@ def settings_menu_text(recent_on=None, repeat_on=None):
 
 
 def pool_menu_text(count=0, random_on=False):
-    """文案池菜单文本。"""
+    """文案池菜单文本（三件事版）。random_on 参数仅为旧调用兼容，不再上菜单。"""
     return (
         "📚 文案池｜%d 条\n\n"
-        "➕ 加文案 — 发一条存一条\n"
-        "📋 看文案 — 列出、逐条删\n"
-        "🔀 随机轮换 — %s\n\n"
-        "开启后每人随机挑一条发，不用手写文案。"
-        % (count, "✅ 开" if random_on else "❌ 关")
+        "➕ 新建文案 — 发一条存一条\n"
+        "📋 已有文案 — 列出池里的文案\n"
+        "🗑 删除文案 — 点一条删一条"
+        % count
     )
 
 
@@ -638,9 +645,8 @@ def verify_relay_kb(iid, it=None):
     if link:
         url = link if link.startswith("http") else "https://" + link.lstrip("/")
         if url.startswith("http"):
-            rows.append([Button.url("🔗 打开群", url=url, style="primary")])
-    rows.append([Button.inline(BTN["cancel_pick"], f"vr:{iid}:x".encode(),
-                              style="danger")])
+            rows.append([Button.url("🔗 打开群", url=url)])
+    rows.append([Button.inline(BTN["cancel_pick"], f"vr:{iid}:x".encode())])
     return rows
 
 
@@ -666,10 +672,8 @@ def pending_join_detail_kb(idx, kind="verify"):
     """单条在途申请的动作面板：盯题=蓝，重试=绿，返回列表=灰。"""
     rows = []
     if kind == "verify":
-        rows.append([Button.inline("📡 继续盯验证消息", f"vja:{idx}".encode(),
-                                   style="primary")])
-    rows.append([Button.inline("✅ 我过了，重试", f"vjr:{idx}".encode(),
-                              style="success")])
+        rows.append([Button.inline("📡 继续盯验证消息", f"vja:{idx}".encode())])
+    rows.append([Button.inline("✅ 我过了，重试", f"vjr:{idx}".encode())])
     rows.append([Button.inline(BTN["back_list"], b"vj:back")])
     return rows
 

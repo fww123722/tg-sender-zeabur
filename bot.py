@@ -55,7 +55,7 @@ from bot_menu import (
     watch_menu_text,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
-    pool_menu_kb, pool_menu_text, pool_inline_kb,
+    pool_menu_kb, pool_menu_text, pool_inline_kb, pool_del_kb,
     pending_joins_inline_kb, pending_join_detail_kb,
 )
 import verify_relay
@@ -671,7 +671,7 @@ def register_handlers(bot, accounts):
             _apply_settings_to_state()
             return _settings_text()
         if action == "menu_pool":
-            return pool_menu_text(db_count_pool(), bool(state.get("pool_random")))
+            return pool_menu_text(db_count_pool())
         base = MENU_SHOW[action]()
         if action == "menu_groups":
             base = groups_menu_text(_is_op(event))
@@ -816,16 +816,18 @@ def register_handlers(bot, accounts):
             _apply_settings_to_state()
             await _reply(event, _settings_text(), buttons=_settings_kb())
         elif action == "pool_random":
+            # 键盘上已拿掉这个键（老板：文案池只要 新建/已有/删除），
+            # 保留处理是为了旧消息还能点，不再引导使用。
             s = _load_settings()
             new = not s.get("pool_random", False)
             s["pool_random"] = new
             ops_set("settings", s)
             state["pool_random"] = new
             if new and not db_count_pool():
-                tip = "⚠️ 已开，但池里还没文案，先点「➕ 加文案」"
+                tip = "⚠️ 已开，但池里还没文案，先点「➕ 新建文案」"
             else:
-                tip = "✅ 已开：每人随机挑一条发" if new else "❌ 已关：用「② 写文案」那一条"
-            await _reply(event, tip + "\n\n" + pool_menu_text(db_count_pool(), new),
+                tip = "✅ 已开：每人随机挑一条发" if new else "❌ 已关：用「① 写文案」那一条"
+            await _reply(event, tip + "\n\n" + pool_menu_text(db_count_pool()),
                          buttons=pool_menu_kb())
         elif action == "pool_clear":
             n = db_clear_pool()
@@ -834,6 +836,8 @@ def register_handlers(bot, accounts):
                          buttons=pool_menu_kb())
         elif action == "pool_list":
             await _pool_list(event)
+        elif action == "pool_del_menu":
+            await _pool_del_menu(event)
         elif action == "camp_status":
             # 在跑：给实时进度（与聊天里那条同文本）；没在跑：不编造进度、不贴草稿清单
             live = state.get("live") or {}
@@ -939,7 +943,7 @@ def register_handlers(bot, accounts):
             return
 
         # 1.2 删除群按钮 → 二次确认（退群+删记录）
-        m_del = re.match(r"^🗑 (\d+)·", text)
+        m_del = re.match(r"^🗑 (\d+) ·", text)
         if m_del:
             g = ((state.get("del_group_map_by") or {}).get(
                 str(event.sender_id)) or {}).get(m_del.group(1))
@@ -954,6 +958,12 @@ def register_handlers(bot, accounts):
                 "2) 删除 Bot 群记录\n\n"
                 "退群不可逆，需重新加群才能回来。",
                 buttons=group_del_confirm_kb())
+            return
+
+        # 1.3 删除文案按钮（消息键盘）→ 删掉那一条，删完接着列剩下的
+        m_pool = re.match(r"^🗑 文案 (\d+) ·", text)
+        if m_pool:
+            await _pool_del_one(event, m_pool.group(1))
             return
 
         # 2. 数字快捷选群已废除（群发不再选群）
@@ -1105,20 +1115,53 @@ def register_handlers(bot, accounts):
         """文案池列表文本+行，首次展示与删除后重渲染共用。"""
         rows = db_list_pool(30)
         if not rows:
-            return False, "📚 文案池还没有文案。点「➕ 加文案」存一条。", []
+            return False, "📚 文案池还没有文案。点「➕ 新建文案」存一条。", []
         total = db_count_pool()
         lines = ["📚 文案池 %d 条%s："
                  % (total, "（下列前 30）" if total > 30 else "")]
         for i, (source, _mid, t) in enumerate(rows, 1):
             head = (t or "").strip().replace("\n", " ")[:46] or "（空）"
             lines.append("%d. %s%s" % (i, head, "" if source == "manual" else " ·采集"))
-        lines.append("点下面按钮删除对应条目：")
+        lines.append("要删除请点「🗑 删除文案」选条。")
         return True, "\n".join(lines), rows
 
     async def _pool_list(event):
+        """已有文案：只列表，不挂内联按钮（老板：全走消息键盘）。"""
+        _ok, text, _rows = _pool_list_text()
+        await _reply(event, text, buttons=pool_menu_kb())
+
+    async def _pool_del_menu(event):
+        """删除文案：每条一个序号按钮（消息键盘），点一条删一条。"""
         _ok, text, rows = _pool_list_text()
-        await _reply(event, text,
-                     buttons=pool_inline_kb(rows) if rows else pool_menu_kb())
+        if not rows:
+            await _reply(event, text, buttons=pool_menu_kb())
+            return
+        # 序号→真实条目 按人存住，免得列表变动后删错
+        state.setdefault("pool_del_map_by", {})[str(event.sender_id)] = {
+            str(i): r for i, r in enumerate(rows, 1)}
+        await _reply(event,
+                     "🗑 点一条删一条（共 %d 条，前 30）：" % db_count_pool(),
+                     buttons=pool_del_kb(rows))
+
+    async def _pool_del_one(event, no):
+        """按序号删一条文案，删完直接给剩下的列表（可连续删）。"""
+        rows_map = (state.get("pool_del_map_by") or {}).get(str(event.sender_id)) or {}
+        hit = rows_map.get(str(no))
+        if not hit:
+            await _reply(event, "⚠️ 这条已经不在了，请重新点「🗑 删除文案」。",
+                         buttons=pool_menu_kb())
+            return
+        source, mid, _t = hit
+        db_del_pool(source, int(mid))
+        _audit(event, "pool_del", str(mid))
+        _ok, text, rows = _pool_list_text()
+        if rows:
+            state.setdefault("pool_del_map_by", {})[str(event.sender_id)] = {
+                str(i): r for i, r in enumerate(rows, 1)}
+            await _reply(event, "🗑 已删 1 条。\n\n" + text, buttons=pool_del_kb(rows))
+        else:
+            await _reply(event, "🗑 已删，文案池现在是空的。\n\n" + text,
+                         buttons=pool_menu_kb())
 
     async def _cb_pool(event, arg):
         """文案池内联：pl:d:<id> 删单条 / pl:clear 清空 / pl:back 返回"""
@@ -1147,9 +1190,9 @@ def register_handlers(bot, accounts):
             db_del_pool(hit[0], mid)
             _audit(event, "pool_del", str(mid))
             _ok, text, rows = _pool_list_text()
-            await event.edit(text,
-                             buttons=pool_inline_kb(rows) if rows else pool_menu_kb())
-            await event.answer("已删除")
+            # 删除入口已改走消息键盘：旧内联按钮点完不再就地重挂内联列表
+            await event.edit(text, buttons=pool_menu_kb())
+            await event.answer("已删除，继续删请点「🗑 删除文案」")
             return
         await event.answer()
 
@@ -1617,12 +1660,13 @@ def register_handlers(bot, accounts):
         # 开了随机轮换 → 用文案池，不要求手写文案
         pool = db_pool_texts() if state.get("pool_random") else []
         if state.get("pool_random") and not pool:
-            await _reply(event, "❌ 文案池是空的。先去「📚 文案池」加几条，或关掉随机轮换。",
+            await _reply(event, "❌ 文案池是空的。先去「📚 文案池」新建几条，或直接用「① 写文案」。",
                          buttons=_camp_kb(event.sender_id))
             return
         text = camp.get("text") or (pool[0] if pool else "")
         if not text:
-            await _reply(event, "❌ 还没写文案。点「① 写文案」发一条，或开「🔀 随机轮换」用文案池。", buttons=_camp_kb(event.sender_id))
+            await _reply(event, "❌ 还没写文案。点「① 写文案」发一条，或去「📚 文案池」新建文案。",
+                         buttons=_camp_kb(event.sender_id))
             return
         targets = db_load_targets()
         if not targets:

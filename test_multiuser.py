@@ -278,7 +278,7 @@ def section_c():
     # 删群三段流程（admin）
     # 删群流程：现在操作员也能走通
     run_handler("on_any_text", FakeEvent(ALICE, BTN["del_group"]))
-    out = run_handler("on_any_text", FakeEvent(ALICE, "🗑 1·群A"))
+    out = run_handler("on_any_text", FakeEvent(ALICE, "🗑 1 · 群A"))
     check("C operator del flow: confirm prompt",
           out and "确认删除群" in out[0])
     out = run_handler("on_any_text", FakeEvent(ALICE, BTN["del_confirm"]))
@@ -288,7 +288,7 @@ def section_c():
 
     # 未授权的人伪造点击，必须无效
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_group"]))
-    run_handler("on_any_text", FakeEvent(STRANGER, "🗑 1·群A"))
+    run_handler("on_any_text", FakeEvent(STRANGER, "🗑 1 · 群A"))
     run_handler("on_any_text", FakeEvent(STRANGER, BTN["del_confirm"]))
     check("C stranger cannot delete group", DELETED == [])
 
