@@ -56,7 +56,7 @@ from bot_menu import (
     watch_menu_text,
     main_menu_text, campaign_menu_text, groups_menu_text,
     accounts_menu_text, settings_menu_text, report_menu_text, profile_menu_text,
-    pool_menu_kb, pool_menu_text, pool_del_kb,
+    pool_menu_kb, pool_menu_text, pool_del_kb, pool_use_kb,
     pending_joins_inline_kb, pending_join_detail_kb,
 )
 import verify_relay
@@ -1127,9 +1127,20 @@ def register_handlers(bot, accounts):
                      "🗑 点一条删一条（共 %d 条，前 30）：" % db_count_pool(),
                      buttons=pool_del_kb(rows))
 
+    async def _pool_use_menu(event):
+        """选一条去群发：把池里已有文案直接设为本次群发文案（不用重打）。"""
+        _ok, text, rows = _pool_list_text()
+        if not rows:
+            await _reply(event, text, buttons=pool_menu_kb())
+            return
+        await _reply(event,
+                     "🚀 点一条当群发文案（共 %d 条，前 30）：" % db_count_pool(),
+                     buttons=pool_use_kb(rows))
+
     async def _cb_pool(event, arg):
-        """文案池内联键盘：pl:new 新建 / pl:list 已有 / pl:del 删除列表 /
-        pl:d:<msg_id> 删一条 / pl:home 回设置 / pl:back 回文案池菜单（pl:clear 兼容旧消息）。"""
+        """文案池内联键盘：pl:new 新建 / pl:list 已有 / pl:use 选一条去群发 /
+        pl:del 删除列表 / pl:d:<msg_id> 删一条 / pl:u:<msg_id> 选一条 /
+        pl:home 回设置 / pl:back 回文案池菜单（pl:clear 兼容旧消息）。"""
         if arg == "home":
             await event.answer()
             await _reply(event, _settings_text(), buttons=_settings_kb())
@@ -1151,6 +1162,35 @@ def register_handlers(bot, accounts):
         if arg == "del":
             await event.answer()
             await _pool_del_menu(event)
+            return
+        if arg == "use":
+            await event.answer()
+            await _pool_use_menu(event)
+            return
+        if arg.startswith("u:"):
+            try:
+                mid = int(arg[2:])
+            except ValueError:
+                await event.answer("参数错误", alert=True)
+                return
+            hit = next((r for r in db_list_pool(30) if int(r[1]) == mid), None)
+            if not hit:
+                await event.answer("这条已不在列表里，请重新打开", alert=True)
+                return
+            picked = (hit[2] or "").strip()
+            if not picked:
+                await event.answer("这条是空文案，发不出去", alert=True)
+                return
+            touch_list(event.sender_id)
+            set_campaign(event.sender_id, text=picked)
+            _audit(event, "pool_use", "%s 字 msg=%d" % (len(picked), mid))
+            head = picked[:80] + ("…" if len(picked) > 80 else "")
+            await event.edit(
+                "✅ 已把池里这条设为群发文案：\n" + head +
+                "\n\n回「🚀 群发运营」点「② 确认开跑」就能发；"
+                "在这里再点一条就换一条。",
+                buttons=pool_use_kb(db_list_pool(30)))
+            await event.answer("已选为群发文案")
             return
         if arg == "clear":
             n = db_clear_pool()

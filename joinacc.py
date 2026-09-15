@@ -85,12 +85,25 @@ async def pick_for_join(accounts):
 
 
 async def _group_count(client):
-    """该账号真实在多少个群/频道（私聊不算）。"""
-    n = 0
+    """该账号在本系统里登了多少个群（老板 09-15：只算 groups_info 登记的群，
+    账号自己历史加的杂群/频道不算，否则数字虚高没法比）。
+
+    返回 (登记群数, 全部群/频道数)；第二个值只用于日志兜底说明。
+    """
+    from db import db_get_all_groups
+    try:
+        registered = {abs(int(g[0])) for g in (db_get_all_groups() or [])}
+    except Exception as e:
+        log.warning(f"[加群号] 读 groups_info 失败: {type(e).__name__}: {e}")
+        registered = set()
+    mine, total = 0, 0
     async for d in client.iter_dialogs():
-        if getattr(d.entity, "title", None) is not None:
-            n += 1
-    return n
+        if getattr(d.entity, "title", None) is None:
+            continue
+        total += 1
+        if not registered or abs(int(d.id)) in registered:
+            mine += 1
+    return mine, total
 
 
 async def ensure(accounts, notify=None):
@@ -108,7 +121,7 @@ async def ensure(accounts, notify=None):
             log.info(f"[加群号] 账号{acc_no} 不可用，跳过")
             continue
         try:
-            n = await _group_count(client)
+            n, _total = await _group_count(client)
         except Exception as e:
             log.warning(f"[加群号] 账号{acc_no} 数群失败 {type(e).__name__}: {e}")
             n = -1
@@ -120,8 +133,9 @@ async def ensure(accounts, notify=None):
     scored.sort(key=lambda x: (-x[0], x[1]))
     best_n, best_no = scored[0]
     detail = "、".join(f"账号{n}={c}群" for c, n in scored if c >= 0)[:120]
-    set_join_acc(best_no, f"群最多（{detail}）")
-    tip = f"🔑 加群号：账号{best_no}（在群 {max(best_n, 0)} 个，自动选定）"
+    set_join_acc(best_no, f"在群最多（{detail}）")
+    tip = (f"🔑 加群号：账号{best_no}（在群 {max(best_n, 0)} 个，自动选定）\n"
+           f"　口径：只数本系统登记的群，账号自带的杂群不算")
     if notify:
         try:
             await notify(tip)

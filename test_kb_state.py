@@ -194,21 +194,31 @@ def main():
     ck("K9 文案池菜单是内联键盘（list of rows）",
        isinstance(M.pool_menu_kb(), list) and isinstance(M.pool_menu_kb()[0], list),
        type(M.pool_menu_kb()))
-    ck("K9 文案池键盘=新建/已有/删除+返回",
-       pl == [M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"],
-              M.BTN["back_settings"]], pl)
+    ck("K9 文案池键盘=新建/已有/选一条去群发/删除+返回",
+       pl == [M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_use"],
+              M.BTN["pool_del"], M.BTN["back_settings"]], pl)
     ck("K9 文案池键盘不再摆随机轮换/清空",
        M.BTN["pool_random"] not in pl and M.BTN["pool_clear"] not in pl, pl)
     ck("K9 三键名字就是老板说的那三个",
        (M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"])
        == ("➕ 新建文案", "📋 已有文案", "🗑 删除文案"),
        (M.BTN["pool_add"], M.BTN["pool_list"], M.BTN["pool_del"]))
-    ck("K9 文案池四件事都有 callback",
+    ck("K9 文案池五件事都有 callback",
        [b.data for row in M.pool_menu_kb() for b in row]
-       == [b"pl:new", b"pl:list", b"pl:del", b"pl:home"],
+       == [b"pl:new", b"pl:list", b"pl:use", b"pl:del", b"pl:home"],
        [b.data for row in M.pool_menu_kb() for b in row])
-    ck("K9 bot.py 接了 pl:new/pl:list/pl:del/pl:home",
-       all(('arg == "%s"' % a) in src_bot for a in ("new", "list", "del", "home")), "回调没接全")
+    ck("K9 bot.py 接了 pl:new/pl:list/pl:use/pl:del/pl:home",
+       all(('arg == "%s"' % a) in src_bot
+           for a in ("new", "list", "use", "del", "home")), "回调没接全")
+    # 老板 09-15：池里的文案要能直接当群发文案（不然池子就是死水）
+    ck("K9 「选一条去群发」已上键盘且名字对",
+       M.BTN["pool_use"] == "🚀 选一条去群发", M.BTN["pool_use"])
+    ck("K9 选中后写入 campaign 文案",
+       'set_campaign(event.sender_id, text=picked)' in src_bot, "没接群发文案")
+    ck("K9 选文案走 callback 带真实 msg_id",
+       all(b.data.startswith(b"pl:u:")
+           for row in M.pool_use_kb([("manual", 11, "a"), ("manual", 12, "b")])[:1]
+           for b in row), [b.data for b in M.pool_use_kb([("m", 11, "a")])[0]])
 
     # 设置：必须是消息附带（内联）键盘，不再发底部 ReplyKeyboard
     ss = M.settings_inline_kb(recent_on=True, repeat_on=True, speed=7, quota=100,

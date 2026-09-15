@@ -61,6 +61,7 @@ BTN = {
     "pool_add": "➕ 新建文案",
     "pool_list": "📋 已有文案",
     "pool_del": "🗑 删除文案",
+    "pool_use": "🚀 选一条去群发",
     "pool_clear": "🗑 清空",
     "pool_random": "🔀 随机轮换",
     # ---- 任务控制 ----
@@ -453,13 +454,33 @@ def settings_speed_quota_kb(speed=None, quota=None):
 
 
 def pool_menu_kb():
-    """文案池菜单（消息附带内联键盘）：就三件事 新建 / 已有 / 删除。"""
+    """文案池菜单（消息附带内联键盘）：新建 / 已有 / 选一条去群发 / 删除。"""
     return [
         _row(Button.inline(BTN["pool_add"], b"pl:new"),
              Button.inline(BTN["pool_list"], b"pl:list")),
+        _row(Button.inline(BTN["pool_use"], b"pl:use")),
         _row(Button.inline(BTN["pool_del"], b"pl:del")),
         _row(Button.inline(BTN["back_settings"], b"pl:home")),
     ]
+
+
+def pool_use_kb(items):
+    """「选一条去群发」键盘：每条一个按钮，回调带真实 msg_id（pl:u:<id>）。
+
+    items: [(source, msg_id, text), ...]，与池列表同序编号。
+    """
+    btns, cur = [], []
+    for i, (_src, mid, t) in enumerate(items, 1):
+        head = " ".join(str(t or "").split())[:14] or "（空）"
+        cur.append(Button.inline(f"{i} · {head}",
+                                 ("pl:u:%d" % int(mid)).encode()))
+        if len(cur) == 2:
+            btns.append(cur)
+            cur = []
+    if cur:
+        btns.append(cur)
+    btns.append([Button.inline(BTN["cancel_pick"], b"pl:back")])
+    return btns
 
 
 def pool_del_kb(items):
