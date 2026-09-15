@@ -765,7 +765,22 @@ def register_handlers(bot, accounts):
         elif action == "profile_menu":
             await _reply(event, profile_menu_text(), buttons=profile_menu_kb())
         elif action == "profile_random":
-            await _run_editprofile(event, accounts, random_mode=True)
+            # 老板 09-15：水果名批改前先问简介（发「跳过」= 不动简介）
+            pending_action[event.sender_id] = "profile_bio_prompt"
+            await _reply(event, INPUT_HINTS["profile_bio_prompt"],
+                         buttons=profile_menu_kb())
+        elif action == "camp_pool":
+            # 「① 写文案」的第二个入口：不手打，直接从文案池挑一条
+            _ok, _txt, rows = _pool_list_text()
+            if not rows:
+                await _reply(event,
+                    "📚 文案池还是空的。要么点「① 写文案」手打一条，"
+                    "要么去「⚙️ 系统设置 → 📚 文案池」新建几条。",
+                    buttons=_camp_kb(event.sender_id))
+            else:
+                await _reply(event,
+                    "📚 点一条直接当群发文案（共 %d 条，前 30）：" % db_count_pool(),
+                    buttons=pool_use_kb(rows))
         elif action == "back_accounts":
             await _reply(event, accounts_menu_text(), buttons=accounts_menu_kb())
         elif action == "back_groups":
@@ -1429,6 +1444,8 @@ def register_handlers(bot, accounts):
             return accounts_menu_kb
         if action == "acc_edit_profile_prompt":
             return accounts_menu_kb
+        if action == "profile_bio_prompt":
+            return profile_menu_kb
         if action == "pool_add_prompt":
             return pool_menu_kb
         return None
@@ -1490,6 +1507,8 @@ def register_handlers(bot, accounts):
             await _add_account_interactive(bot, text, event.chat_id, event.sender_id)
         elif action == "acc_edit_profile_prompt":
             await _run_editprofile(event, accounts, text)
+        elif action == "profile_bio_prompt":
+            await _run_editprofile(event, accounts, random_mode=True, bio=text)
         elif action == "set_speed_prompt":
             try:
                 sec = max(1, int(text))
@@ -1812,7 +1831,7 @@ def register_handlers(bot, accounts):
         r = await check_login_accounts(accounts)
         await _edit_or_send(m0, event, r, buttons=accounts_menu_kb())
 
-    async def _run_editprofile(event, accounts, name=None, random_mode=False):
+    async def _run_editprofile(event, accounts, name=None, random_mode=False, bio=None):
         if _no_accounts(event):
             return
         if state["busy"]:
@@ -1821,11 +1840,19 @@ def register_handlers(bot, accounts):
         _set_busy(event.sender_id)
         try:
             if random_mode:
+                # 老板 09-15：姓=水果、名=「主页万人做单群」，简介这一轮现问（发跳过=不动）
+                b = (bio or "").strip()
+                if b in ("跳过", "skip", "-", "不改"):
+                    b = None
+                if b and len(b) > 70:
+                    b = b[:70]
                 m0 = await _reply(event,
-                    "🎲 开始改资料：随机蔬果小名 + 补用户名 + 无头像的补风景照…\n"
-                    "每号间隔 2 秒。")
+                    "🍉 开始改资料：名字=「水果 + 主页万人做单群」\n"
+                    f"  简介：{b or '(不改)'}\n"
+                    "  补用户名；没头像的补风景照。每号间隔 2 秒…")
                 r = await edit_all_profiles(event.chat_id, random_names=True,
-                                            random_avatar=True, username_mode="random")
+                                            random_avatar=True, username_mode="random",
+                                            bio=b)
                 await _edit_or_send(m0, event, r, buttons=accounts_menu_kb())
                 return
             # 「跳过」= 不改名字，只处随机用户名

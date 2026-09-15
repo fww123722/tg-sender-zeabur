@@ -22,6 +22,7 @@ BTN = {
     "report": "🚨 举报中心",
     # ---- 群发运营：不选群了，就两步（写文案 → 确认开跑）----
     "camp_step3": "① 写文案",
+    "camp_pool": "📚 从池选",
     "camp_start": "② 确认开跑",
     "camp_status": "📈 查看进度",
     # 成员页被锁时的备用入口（撞锁已会自动接力，这个是手动多翻几条）
@@ -45,7 +46,7 @@ BTN = {
     "acc_filter": "🔍 账号过滤",
     "acc_cd_reset": "🧊 重置冷却",
     # ---- 改资料 ----
-    "profile_random": "🎲 随机小名",
+    "profile_random": "🍉 水果名批改",
     "profile_name": "✏️ 统一名字",
     # ---- 数据看板 ----
     "dashboard_view": "📊 查看数据",
@@ -96,6 +97,7 @@ BTN_ACTION = {
     BTN["settings"]: "menu_settings",
     BTN["report"]: "menu_report",
     BTN["camp_step3"]: "camp_step3",
+    BTN["camp_pool"]: "camp_pool",
     BTN["camp_start"]: "camp_start",
     BTN["camp_status"]: "camp_status",
     BTN["camp_speakers"]: "camp_speakers_prompt",
@@ -155,6 +157,7 @@ INPUT_ACTIONS = {
     "set_parallel_prompt",
     "camp_step3",  # 写文案：输入内容
     "pool_add_prompt",  # 文案池：输入一条文案
+    "profile_bio_prompt",  # 水果名批改：先问简介（可跳过）
     "rep_user_prompt",  # 举报用户：输入用户名/链接
     "rep_channel_ai_prompt",  # AI批量：输入频道/群组
     "camp_speakers_prompt",  # 采发言人：输入群链接（可带条数）
@@ -170,6 +173,8 @@ INPUT_HINTS = {
     "set_parallel_prompt": "请输入并行发送的账号数（例如 3）：",
     "camp_step3": "请输入要群发的文案内容（可多行文字）：",
     "pool_add_prompt": "请发送要新建的文案内容（一次一条，存进文案池）：",
+    "profile_bio_prompt": ("请发送【简介】内容（每个号都改成这条，70 字以内）：\n"
+                           "发「跳过」= 只改名字，不动简介。"),
     "rep_user_prompt": "请发送要举报的用户/频道（@username 或 t.me/xxx）：",
     "rep_channel_ai_prompt": "请发送要 AI 批量举报的频道/群组用户名或链接：",
     "camp_speakers_prompt": (
@@ -196,6 +201,7 @@ STYLE_BY_ACTION = {
     "vjr": "success",              # ✅ 我过了，重试
     # 蓝：推进下一步 / 进入下一环节
     "camp_step3": "primary",
+    "camp_pool": "primary",
     "camp_speakers_prompt": "primary",
     "resume": "primary",
     "profile_random": "primary",
@@ -274,7 +280,7 @@ def main_menu_kb(is_operator: bool = False):
 
 def campaign_menu_kb(stage=0, running=False, paused=False):
     """群发运营键盘（底部键盘）：**只给此刻真能按的键**。
-    按录入时间从新到旧发。所以只剩两步：写文案 → 确认开跑。
+    按录入时间从新到旧发。所以只剩两步：① 文案（手打 / 从池选）→ ② 确认开跑。
     stage：0=还差文案　1=文案已有（可开跑）——只把该按那一步标绿，排版不变。
     running/paused：有任务在跑时整排换成控制键，不会把开跑键重复摆着让人重发。
     """
@@ -286,7 +292,8 @@ def campaign_menu_kb(stage=0, running=False, paused=False):
             (BTN["back"],),
         ], {go: "success"})
     rows = [
-        (BTN["camp_step3"], BTN["camp_start"]),
+        (BTN["camp_step3"], BTN["camp_pool"]),
+        (BTN["camp_start"],),
         (BTN["camp_status"],),
         (BTN["back"],),
     ]
@@ -569,9 +576,9 @@ def main_menu_text(accounts, groups_count, unsent_count, pool_count, busy: bool,
 
 
 def campaign_menu_text():
-    """群发运营：两步说完。"""
-    return ("\U0001f680 群发运营\uff5c\u2460 写文案 \u2192 \u2461 \u786e\u8ba4\u5f00\u8dd1\n"
-            "\u9ed8\u8ba4\u6253\u6240\u6709\u7fa4\u7684\u4eba\uff08\u65b0\u7684\u5148\u53d1\uff09\uff0c\u53d1\u8fc7\u7684\u81ea\u52a8\u8df3\u8fc7\u3002")
+    """群发运营：两步说完（① 文案有两个入口：手打 / 从池选）。"""
+    return ("🚀 群发运营｜① 文案（✏️ 手打 或 📚 从池选）→ ② 确认开跑\n"
+            "默认打所有群的人（新的先发），发过的自动跳过。")
 
 
 def groups_menu_text(is_operator: bool = False):
@@ -595,9 +602,9 @@ def accounts_menu_text():
 
 
 def profile_menu_text():
-    return ("\U0001f4dd \u6279\u91cf\u6539\u8d44\u6599\n"
-            "\U0001f3b2 \u968f\u673a\u5c0f\u540d\uff08\u8865\u7528\u6237\u540d+\u968f\u673a\u5934\u50cf\uff09\u00b7 \u270f\ufe0f \u7edf\u4e00\u540d\u5b57\n"
-            "\u6bcf\u53f7\u9694 2 \u79d2\u9632\u98ce\u63a7\u3002")
+    return ("📝 批量改资料\n"
+            "🍉 水果名批改：姓=随机水果，名=主页万人做单群（简介可自定义）\n"
+            "✏️ 统一名字：所有号同一个名。每号隔 2 秒防风控。")
 
 
 def settings_menu_text(recent_on=None, repeat_on=None):

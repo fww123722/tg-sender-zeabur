@@ -47,8 +47,9 @@ _LANDSCAPE_URLS = [
 ]
 
 
-# 随机中文小名池：姓固定「小」+ 水果/蔬菜名（亲切好记，像真人随手起的名）
-_SURNAME = "小"
+# 名字方案（老板 09-15 定的口径）：姓 = 随机水果，名 = 固定「主页万人做单群」
+# 展示出来就是「苹果 主页万人做单群」，名字里自带引流话术。
+_GIVEN_FIXED = "主页万人做单群"
 
 # 蔬菜
 _VEGETABLES = [
@@ -66,10 +67,12 @@ _CN_GIVEN = _VEGETABLES + _FRUITS
 
 
 def gen_cn_name():
-    """随机中文小名：姓固定「小」，名取自水果/蔬菜池。
-    返回 (first_name, last_name)：整名放 first_name，last_name 返回空串
-    （必须清空，否则旧姓氏会残留变成「小苹果 Smith」）。"""
-    return _SURNAME + random.choice(_CN_GIVEN), ""
+    """随机名：姓=水果（放 first_name），名=固定「主页万人做单群」（放 last_name）。
+
+    返回 (first_name, last_name)。两个字段都写死覆盖，
+    否则旧名/旧姓会残留变成「苹果 张三」。
+    """
+    return random.choice(_FRUITS), _GIVEN_FIXED
 
 
 async def has_avatar(client):
@@ -313,7 +316,8 @@ async def edit_all_profiles(owner_entity, name=None, bio=None, last_name=None,
     results = []
     if has_edit:
         results.append(f"📝 待改账号 {len(ACTIVE_ACCOUNTS)} 个 | "
-                       f"名字={'随机小名(小+蔬果)' if random_names else (profile.get('first_name') or '(不改)')} | "
+                       f"名字={'水果姓+主页万人做单群' if random_names else (profile.get('first_name') or '(不改)')} | "
+                       f"简介={profile.get('about') or '(不改)'} | "
                        f"用户名={'随机生成' if profile['_username_mode'] == 'random' else (profile['_username_mode'] or '不改')}")
         for acc_no, client, _ph in list(ACTIVE_ACCOUNTS):
             p = dict(profile)
